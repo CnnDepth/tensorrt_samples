@@ -197,74 +197,79 @@ void doInference(IExecutionContext& context, float* inputData, float* output, si
     cudaStreamDestroy(stream);
     CHECK(cudaFree(buffers[inputIndex]));
     CHECK(cudaFree(buffers[outputIndex]));
-    //CHECK(cudaFree(buffers[outputIndex1]));
 }
 
 
 class NearestNeighborUpsamplingPlugin : public IPluginV2
 {
 public:
-    NearestNeighborUpsamplingPlugin()
+    NearestNeighborUpsamplingPlugin(int nbInputChannels, int inputHeight, int inputWidth)
     {
-        std::cout << "Init from nothing" << std::endl;
+        std::cout << "Init " << this << " from dims" << std::endl;  
+        mNbInputChannels = nbInputChannels;
+        mInputWidth = inputWidth;
+        mInputHeight = inputHeight;
+        std::cout << "set input width: " << mInputWidth << std::endl;
     }
 
     NearestNeighborUpsamplingPlugin(const Weights *weights, size_t nbWeights)
     {
-        std::cout << "Init from weights" << std::endl;
+        std::cout << "Init " << this << " from weights" << std::endl;
         std::cout << "I have " << nbWeights << " weights" << endl;
         std::cout << "weights ptr is " << weights << std::endl;
     }
 
     NearestNeighborUpsamplingPlugin(const void* data, size_t length)
     {
-        std::cout << "Init from data and length" << std::endl;
+        std::cout << "Init " << this << " from data and length" << std::endl;
         const char* d = static_cast<const char*>(data), *a = d;
         read(d, mNbInputChannels);
         read(d, mInputWidth);
         read(d, mInputHeight);
         read(d, mDataType);
+        std::cout << "Readed input width " << mInputWidth << std::endl;
         assert(d == a + length);
     }
 
     ~NearestNeighborUpsamplingPlugin()
     {
-        std::cout << "delete plugin" << std::endl;
+        std::cout << "delete plugin " << this << std::endl;
     }
 
     int getNbOutputs() const override
     {
-        std::cout << "get number of outputs" << std::endl;
+        std::cout << "get number of outputs of " << this << std::endl;
         return 1;
     }
 
     Dims getOutputDimensions(int index, const Dims* inputs, int nbInputDims) override
     {
-        std::cout << "Get output dimensions" << std::endl;
+        std::cout << "Get output dimensions of " << this << std::endl;
         std::cout << "input dims are: " << inputs[0].d[0] << ' ' << inputs[0].d[1] << ' ' << inputs[0].d[2] << std::endl;
         assert(index == 0 && nbInputDims == 1 && inputs[0].nbDims == 3);
         mNbInputChannels = inputs[0].d[0];
         mInputHeight = inputs[0].d[1];
         mInputWidth = inputs[0].d[2];
+        std::cout << "set input width " << mInputWidth << std::endl;
         return Dims3(inputs[0].d[0], 2 * inputs[0].d[1], 2 * inputs[0].d[2]);
     }
 
     bool supportsFormat(DataType type, PluginFormat format) const override 
     { 
-        std::cout << "supports format" << std::endl;
+        std::cout << "supports format? " << this << std::endl;
         return (type == DataType::kFLOAT || type == DataType::kHALF) && format == PluginFormat::kNCHW; 
     }
 
     void configureWithFormat(const Dims* inputDims, int nbInputs, const Dims* outputDims, int nbOutputs, DataType type, PluginFormat format, int maxBatchSize) override
     {
-        std::cout << "configure with format" << std::endl;
+        std::cout << "configure " << this << " with format" << std::endl;
         assert((type == DataType::kFLOAT || type == DataType::kHALF) && format == PluginFormat::kNCHW);
         mDataType = type;
     }
 
     int initialize() override
     {
-        std::cout << "Initialize plugin" << std::endl;
+        std::cout << "Initialize plugin " << this << std::endl;
         CHECK(cudnnCreate(&mCudnn));// initialize cudnn and cublas
         CHECK(cublasCreate(&mCublas));
         return 0;
@@ -272,7 +277,7 @@ public:
 
     virtual void terminate() override
     {
-        std::cout << "terminate plugin" << std::endl;
+        std::cout << "terminate plugin " << this << std::endl;
         CHECK(cublasDestroy(mCublas));
         CHECK(cudnnDestroy(mCudnn));
         // write below code for custom variables
@@ -280,33 +285,34 @@ public:
 
     virtual size_t getWorkspaceSize(int maxBatchSize) const override
     {
-        std::cout << "get workspace size of plugin" << std::endl;
+        std::cout << "get workspace size of " << this << std::endl;
         return 0;
     }
 
     virtual int enqueue(int batchSize, const void*const * inputs, void** outputs, void* workspace, cudaStream_t stream) override
     {
-        std::cout << "enquque plugin" << std::endl;
+        std::cout << "enquque plugin " << this << std::endl;
         // perform nearest neighbor upsampling using cuda
-        cublasSetStream(mCublas, stream);
-        cudnnSetStream(mCudnn, stream);
-        cudaResizeNearestNeighbor((float*)inputs[0], mNbInputChannels, mInputWidth, mInputHeight, (float*)outputs[0], stream);
+        CHECK(cublasSetStream(mCublas, stream));
+        CHECK(cudnnSetStream(mCudnn, stream));
+        CHECK(cudaResizeNearestNeighbor((float*)inputs[0], mNbInputChannels, mInputWidth, mInputHeight, (float*)outputs[0], stream));
         return 0;
     }
 
     virtual size_t getSerializationSize() const override
     {
-        std::cout << "get serialization size of plugin" << std::endl;
         // 3 size_t values: input width, input height, and number of channels
         // and one more value for data type
-        return sizeof(DataType) + 3 * sizeof(size_t);
+        return sizeof(DataType) + 3 * sizeof(int);
     }
 
     virtual void serialize(void* buffer) const override
     {
-        std::cout << "serialize" << std::endl;
+        std::cout << "serialize " << this << std::endl;
         char* d = static_cast<char*>(buffer), *a = d;
 
+        std::cout << "this is " << this << std::endl;
+        std::cout << "Write input width " << mInputWidth << std::endl;
         write(d, mNbInputChannels);
         write(d, mInputWidth);
         write(d, mInputHeight);
@@ -316,13 +322,13 @@ public:
 
     const char* getPluginType() const override 
     { 
-        std::cout << "get plugin type" << std::endl;
+        std::cout << "get type of " << this << std::endl;
         return "ResizeNearestNeighbor";
     }
 
     const char* getPluginVersion() const override 
     { 
-        std::cout << "get plugin version" << std::endl;
+        std::cout << "get version of " << this << std::endl;
         return "1";
     }
 
@@ -330,7 +336,7 @@ public:
 
     IPluginV2* clone() const override
     {
-        return new NearestNeighborUpsamplingPlugin();
+        return new NearestNeighborUpsamplingPlugin(mNbInputChannels, mInputHeight, mInputWidth);
     }
 
     void setPluginNamespace(const char* libNamespace) override { mNamespace = libNamespace; }
@@ -402,7 +408,7 @@ private:
     DataType mDataType{DataType::kFLOAT};
     cudnnHandle_t mCudnn;
     cublasHandle_t mCublas;
-    size_t mNbInputChannels=0, mInputWidth=0, mInputHeight=0;
+    int mNbInputChannels=0, mInputWidth=0, mInputHeight=0;
     std::string mNamespace = "";
 };
 
@@ -413,6 +419,12 @@ public:
     NearestNeighborUpsamplingPluginCreator()
     {
         std::cout << "Create plugin creator" << std::endl;
+        mPluginAttributes.emplace_back(PluginField("nbInputChannels", nullptr, PluginFieldType::kINT32, 1));
+        mPluginAttributes.emplace_back(PluginField("inputHeight", nullptr, PluginFieldType::kINT32, 1));
+        mPluginAttributes.emplace_back(PluginField("inputWidth", nullptr, PluginFieldType::kINT32, 1));
+
+        mFC.nbFields = mPluginAttributes.size();
+        mFC.fields = mPluginAttributes.data();
     }
 
     ~NearestNeighborUpsamplingPluginCreator() {}
@@ -435,7 +447,27 @@ public:
     {
         std::cout << "create plugin using the creator" << std::endl;
         std::cout << "name is " << name << std::endl;
-        return new NearestNeighborUpsamplingPlugin();
+        const PluginField* fields = fc->fields;
+        for (int i = 0; i < fc->nbFields; ++i)
+        {
+            const char* attrName = fields[i].name;
+            if (!strcmp(attrName, "nbInputChannels"))
+            {
+                //assert(fields[i].type == PluginFieldType::kINT32);
+                mNbInputChannels = *(static_cast<const int*>(fields[i].data));
+            }
+            if (!strcmp(attrName, "inputHeight"))
+            {
+                //assert(fields[i].type == PluginFieldType::kINT32);
+                mInputHeight = *(static_cast<const int*>(fields[i].data));
+            }
+            if (!strcmp(attrName, "inputWidth"))
+            {
+                //assert(fields[i].type == PluginFieldType::kINT32);
+                mInputWidth = *(static_cast<const int*>(fields[i].data));
+            }
+        }
+        return new NearestNeighborUpsamplingPlugin(mNbInputChannels, mInputHeight, mInputWidth);
     }
 
     IPluginV2* deserializePlugin(const char* name, const void* serialData, size_t serialLength) override
@@ -453,9 +485,11 @@ private:
     static PluginFieldCollection mFC;
     static std::vector<PluginField> mPluginAttributes;
     std::string mNamespace = "";
+    int mNbInputChannels, mInputHeight, mInputWidth;
 };
 
 PluginFieldCollection NearestNeighborUpsamplingPluginCreator::mFC{};
+std::vector<PluginField> NearestNeighborUpsamplingPluginCreator::mPluginAttributes;
 REGISTER_TENSORRT_PLUGIN(NearestNeighborUpsamplingPluginCreator);
 
 int main(int argc, char* argv[])
@@ -516,14 +550,15 @@ int main(int argc, char* argv[])
 
     // Execute engine
     std::vector<float> output(N * OUTPUT_C * OUTPUT_W * OUTPUT_H);
+    std::cout << "first output pixel: " << output[0] << std::endl;
     doInference(*context, &data[0], &output[0], 1);
+    std::cout << "first output pixel: " << output[0] << std::endl;
 
     // Write result on disk
     int OUTPUT_SIZE = N * OUTPUT_C * OUTPUT_H * OUTPUT_W;
     uint8_t* outputPixels = new uint8_t[OUTPUT_SIZE];
     for (int i = 0; i < OUTPUT_SIZE; i++)
         outputPixels[i] = uint8_t(output[i] * 255.0);
-    std::cout << "First output pixel: " << int(outputPixels[0]) << std::endl;
     std::ofstream outfile("bus_upsampled.ppm", std::ofstream::binary);
     outfile << "P6"
             << "\n"

@@ -1,5 +1,6 @@
 #include "upsampling.h"
 #include <iostream>
+#include <cassert>
 
 // gpu operation for nearest neighbor upsampling
 template <typename T>
@@ -21,6 +22,7 @@ __global__ void gpuResizeNearestNeighbor( T* input, int nChannels, int iWidth, i
     const T px = input[x * iWidth * iHeight + dy * iWidth + dz];
 
     output[x * oWidth * oHeight + y * oWidth + z] = px;
+    //output[0] = 1;
 }
 
 
@@ -30,10 +32,16 @@ cudaError_t cudaResizeNearestNeighbor( float* input, size_t nChannels, size_t in
 {
     std::cout << "cudaResizeNearestNeighbor" << std::endl;
     if( !input || !output )
+    {
+        std::cout << "No input or no output" << std::endl;
         return cudaErrorInvalidDevicePointer;
+    }
 
     if( inputWidth == 0 || inputHeight == 0 )
+    {
+        std::cout << "Width or height is 0" << std::endl;
         return cudaErrorInvalidValue;
+    }
 
     // launch kernel
     const dim3 blockDim(1, 8, 8);

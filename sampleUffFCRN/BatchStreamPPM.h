@@ -15,11 +15,11 @@ static constexpr int INPUT_H = 240;
 static constexpr int INPUT_W = 320;
 
 static constexpr int OUTPUT_C = 3;
-static constexpr int OUTPUT_H = 960;
-static constexpr int OUTPUT_W = 1280;
+static constexpr int OUTPUT_H = 480;
+static constexpr int OUTPUT_W = 640;
 
 const char* INPUT_BLOB_NAME = "Placeholder";
-const char* OUTPUT_BLOB_NAME = "up_sampling2d_2/transpose_1";
+const char* OUTPUT_BLOB_NAME = "up_sampling2d_1/ResizeNearestNeighbor";
 
 class BatchStream
 {
