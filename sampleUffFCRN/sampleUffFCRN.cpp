@@ -178,12 +178,14 @@ void doInference(IExecutionContext& context, float* inputData, float* output, si
     // DMA the input to the GPU,  execute the batch asynchronously, and DMA it back:
     CHECK(cudaMemcpyAsync(buffers[inputIndex], inputData, batchSize * INPUT_C * INPUT_H * INPUT_W * sizeof(float), cudaMemcpyHostToDevice, stream));
 
-    auto t_start = std::chrono::high_resolution_clock::now();
     context.execute(batchSize, &buffers[0]);
+    auto t_start = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < 10; i++)
+        context.execute(batchSize, &buffers[0]);
     auto t_end = std::chrono::high_resolution_clock::now();
     float total = std::chrono::duration<float, std::milli>(t_end - t_start).count();
 
-    std::cout << "Time taken for inference is " << total << " ms." << std::endl;
+    std::cout << "Average inference time over 10 runs: " << total / 10.0 << " ms." << std::endl;
 
     CHECK(cudaMemcpyAsync(output,
                           buffers[outputIndex],
@@ -499,7 +501,7 @@ int main(int argc, char* argv[])
     auto fileName = locateFile("test_upsampling.uff");
 
     auto parser = createUffParser();
-    parser->registerInput("Placeholder", DimsCHW(3, 240, 320), UffInputOrder::kNCHW);
+    parser->registerInput("Placeholder", DimsCHW(3, 480, 640), UffInputOrder::kNCHW);
     parser->registerOutput("MarkOutput_0");
 
     BatchStream calibrationStream(CAL_BATCH_SIZE, NB_CAL_BATCHES);

@@ -11,15 +11,15 @@
 std::string locateFile(const std::string& input);
 
 static constexpr int INPUT_C = 3;
-static constexpr int INPUT_H = 240;
-static constexpr int INPUT_W = 320;
+static constexpr int INPUT_H = 480;
+static constexpr int INPUT_W = 640;
 
-static constexpr int OUTPUT_C = 3;
+static constexpr int OUTPUT_C = 1;
 static constexpr int OUTPUT_H = 480;
 static constexpr int OUTPUT_W = 640;
 
 const char* INPUT_BLOB_NAME = "Placeholder";
-const char* OUTPUT_BLOB_NAME = "up_sampling2d_1/ResizeNearestNeighbor";
+const char* OUTPUT_BLOB_NAME = "reshape_1/Reshape";
 
 class BatchStream
 {

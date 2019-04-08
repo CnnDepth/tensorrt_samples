@@ -4,7 +4,7 @@
 
 // gpu operation for nearest neighbor upsampling
 template <typename T>
-__global__ void gpuResizeNearestNeighbor( T* input, int nChannels, int iWidth, int iHeight, T* output)
+__global__ void gpuResizeNearestNeighbor( T* input, int nChannels, int iHeight, int iWidth, T* output)
 {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -13,16 +13,15 @@ __global__ void gpuResizeNearestNeighbor( T* input, int nChannels, int iWidth, i
     const size_t oWidth = 2 * iWidth;
     const size_t oHeight = 2 * iHeight;
 
-    if( x >= nChannels || y >= oWidth || z >= oHeight )
+    if( x >= nChannels || y >= oHeight || z >= oWidth )
         return;
 
-    const int dy = ((float)x * 0.5);
-    const int dz = ((float)y * 0.5);
+    const int dy = ((float)y * 0.5);
+    const int dz = ((float)z * 0.5);
 
     const T px = input[x * iWidth * iHeight + dy * iWidth + dz];
 
     output[x * oWidth * oHeight + y * oWidth + z] = px;
-    //output[0] = 1;
 }
 
 
@@ -44,12 +43,12 @@ cudaError_t cudaResizeNearestNeighbor( float* input, size_t nChannels, size_t in
     }
 
     // launch kernel
-    const dim3 blockDim(1, 8, 8);
+    const dim3 blockDim(4, 8, 8);
     const size_t outputWidth = 2 * inputWidth;
     const size_t outputHeight = 2 * inputHeight;
-    const dim3 gridDim(iDivUp(nChannels, blockDim.x), iDivUp(outputWidth, blockDim.y), iDivUp(outputHeight, blockDim.z));
+    const dim3 gridDim(iDivUp(nChannels, blockDim.x), iDivUp(outputHeight, blockDim.y), iDivUp(outputWidth, blockDim.z));
 
-    gpuResizeNearestNeighbor<float><<<gridDim, blockDim, 0, stream>>>(input, nChannels, inputWidth, inputHeight, output);
+    gpuResizeNearestNeighbor<float><<<gridDim, blockDim, 0, stream>>>(input, nChannels, inputHeight, inputWidth, output);
 
     return CUDA(cudaGetLastError());
 }
