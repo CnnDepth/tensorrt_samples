@@ -1,4 +1,5 @@
 #include "upsampling.h"
+#include <iostream>
 
 // gpu operation for nearest neighbor upsampling
 template <typename T>
@@ -27,6 +28,7 @@ __global__ void gpuResizeNearestNeighbor( T* input, int nChannels, int iWidth, i
 cudaError_t cudaResizeNearestNeighbor( float* input, size_t nChannels, size_t inputWidth, size_t inputHeight,
                         float* output, cudaStream_t stream )
 {
+    std::cout << "cudaResizeNearestNeighbor" << std::endl;
     if( !input || !output )
         return cudaErrorInvalidDevicePointer;
 

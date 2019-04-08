@@ -46,13 +46,14 @@ std::string locateFile(const std::string& input)
 
 
 ICudaEngine* loadModelAndCreateEngine(const char* uffFile, int maxBatchSize,
-                                      IUffParser* parser, IHostMemory*& trtModelStream)
+                                      IUffParser* parser, nvuffparser::IPluginFactory* pluginFactory, IHostMemory*& trtModelStream)
 {
     // Create the builder
     IBuilder* builder = createInferBuilder(gLogger);
 
     // Parse the UFF model to populate the network, then set the outputs.
     INetworkDefinition* network = builder->createNetwork();
+    parser->setPluginFactory(pluginFactory);
 
     std::cout << "Begin parsing model..." << std::endl;
     if (!parser->parse(uffFile, *network, nvinfer1::DataType::kFLOAT))
@@ -85,130 +86,9 @@ ICudaEngine* loadModelAndCreateEngine(const char* uffFile, int maxBatchSize,
 }
 
 
-ICudaEngine* loadModelAndCreateEngine(const char* uffFile, int maxBatchSize,
-                                      IUffParser* parser, IInt8Calibrator* calibrator, IHostMemory*& trtModelStream)
-{
-    // Create the builder
-    IBuilder* builder = createInferBuilder(gLogger);
-
-    // Parse the UFF model to populate the network, then set the outputs.
-    INetworkDefinition* network = builder->createNetwork();
-
-    std::cout << "Begin parsing model..." << std::endl;
-    if (!parser->parse(uffFile, *network, nvinfer1::DataType::kFLOAT))
-        RETURN_AND_LOG(nullptr, ERROR, "Fail to parse");
-
-    std::cout << "End parsing model..." << std::endl;
-
-    // Build the engine.
-    builder->setMaxBatchSize(maxBatchSize);
-    // The _GB literal operator is defined in common/common.h
-    builder->setMaxWorkspaceSize(1_GB); // We need about 1GB of scratch space for the plugin layer for batch size 5.
-    builder->setHalf2Mode(false);
-    if (args.runInInt8)
-    {
-        builder->setInt8Mode(true);
-        builder->setInt8Calibrator(calibrator);
-    }
-
-    std::cout << "Begin building engine..." << std::endl;
-    ICudaEngine* engine = builder->buildCudaEngine(*network);
-    if (!engine)
-        RETURN_AND_LOG(nullptr, ERROR, "Unable to create engine");
-    std::cout << "End building engine..." << std::endl;
-
-    // We don't need the network any more, and we can destroy the parser.
-    network->destroy();
-    parser->destroy();
-
-    // Serialize the engine, then close everything down.
-    trtModelStream = engine->serialize();
-
-    builder->destroy();
-    shutdownProtobufLibrary();
-    return engine;
-}
-
-std::vector<std::pair<int64_t, DataType>>
-calculateBindingBufferSizes(const ICudaEngine& engine, int nbBindings, int batchSize)
-{
-    std::vector<std::pair<int64_t, DataType>> sizes;
-    for (int i = 0; i < nbBindings; ++i)
-    {
-        Dims dims = engine.getBindingDimensions(i);
-        DataType dtype = engine.getBindingDataType(i);
-
-        int64_t eltCount = samplesCommon::volume(dims) * batchSize;
-        sizes.push_back(std::make_pair(eltCount, dtype));
-    }
-
-    return sizes;
-}
-
-void doInference(IExecutionContext& context, float* inputData, float* output, size_t batchSize)
-{
-    const ICudaEngine& engine = context.getEngine();
-    // Input and output buffer pointers that we pass to the engine - the engine requires exactly IEngine::getNbBindings(),
-    // of these, but in this case we know that there is exactly 1 input and 2 output.
-    int nbBindings = engine.getNbBindings();
-    std::cout << "engine has " << nbBindings << " bindings" << std::endl;
-
-    std::vector<void*> buffers(nbBindings);
-    std::vector<std::pair<int64_t, DataType>> buffersSizes = calculateBindingBufferSizes(engine, nbBindings, batchSize);
-
-    for (int i = 0; i < nbBindings; ++i)
-    {
-        auto bufferSizesOutput = buffersSizes[i];
-        buffers[i] = samplesCommon::safeCudaMalloc(bufferSizesOutput.first * samplesCommon::getElementSize(bufferSizesOutput.second));
-    }
-
-    // In order to bind the buffers, we need to know the names of the input and output tensors.
-    // Note that indices are guaranteed to be less than IEngine::getNbBindings().
-    int inputIndex = engine.getBindingIndex(INPUT_BLOB_NAME),
-        outputIndex = engine.getBindingIndex(OUTPUT_BLOB_NAME);
-        //outputIndex1 = outputIndex0 + 1; //engine.getBindingIndex(OUTPUT_BLOB_NAME1);
-    std::cout << "Input index: " << inputIndex << std::endl;
-    std::cout << "Output index: " << outputIndex << std::endl;
-    std::cout << "Input buffer size: " << buffersSizes[inputIndex].first << std::endl;
-    std::cout << "Output buffer size: " << buffersSizes[outputIndex].first << std::endl;
-
-    cudaStream_t stream;
-    CHECK(cudaStreamCreate(&stream));
-
-    // DMA the input to the GPU,  execute the batch asynchronously, and DMA it back:
-    CHECK(cudaMemcpyAsync(buffers[inputIndex], inputData, batchSize * INPUT_C * INPUT_H * INPUT_W * sizeof(float), cudaMemcpyHostToDevice, stream));
-
-    auto t_start = std::chrono::high_resolution_clock::now();
-    context.execute(batchSize, &buffers[0]);
-    auto t_end = std::chrono::high_resolution_clock::now();
-    float total = std::chrono::duration<float, std::milli>(t_end - t_start).count();
-
-    std::cout << "Time taken for inference is " << total << " ms." << std::endl;
-
-    CHECK(cudaMemcpyAsync(output,
-                          buffers[outputIndex],
-                          batchSize * OUTPUT_C * OUTPUT_H * OUTPUT_W * sizeof(float),
-                          cudaMemcpyDeviceToHost, 
-                          stream)
-    );
-    cudaStreamSynchronize(stream);
-
-    // Release the stream and the buffers
-    cudaStreamDestroy(stream);
-    CHECK(cudaFree(buffers[inputIndex]));
-    CHECK(cudaFree(buffers[outputIndex]));
-    //CHECK(cudaFree(buffers[outputIndex1]));
-}
-
-
-class NearestNeighborUpsamplingPlugin : public IPluginV2
+class NearestNeighborUpsamplingPlugin : public IPluginExt
 {
 public:
-    NearestNeighborUpsamplingPlugin()
-    {
-        std::cout << "Init from nothing" << std::endl;
-    }
-
     NearestNeighborUpsamplingPlugin(const Weights *weights, size_t nbWeights)
     {
         std::cout << "Init from weights" << std::endl;
@@ -294,7 +174,7 @@ public:
         return 0;
     }
 
-    virtual size_t getSerializationSize() const override
+    virtual size_t getSerializationSize() override
     {
         std::cout << "get serialization size of plugin" << std::endl;
         // 3 size_t values: input width, input height, and number of channels
@@ -302,7 +182,7 @@ public:
         return sizeof(DataType) + 3 * sizeof(size_t);
     }
 
-    virtual void serialize(void* buffer) const override
+    virtual void serialize(void* buffer) override
     {
         std::cout << "serialize" << std::endl;
         char* d = static_cast<char*>(buffer), *a = d;
@@ -314,43 +194,19 @@ public:
         assert(d == a + getSerializationSize());
     }
 
-    const char* getPluginType() const override 
-    { 
-        std::cout << "get plugin type" << std::endl;
-        return "ResizeNearestNeighbor";
-    }
-
-    const char* getPluginVersion() const override 
-    { 
-        std::cout << "get plugin version" << std::endl;
-        return "1";
-    }
-
-    void destroy() override { delete this; }
-
-    IPluginV2* clone() const override
-    {
-        return new NearestNeighborUpsamplingPlugin();
-    }
-
-    void setPluginNamespace(const char* libNamespace) override { mNamespace = libNamespace; }
-
-    const char* getPluginNamespace() const override { return mNamespace.c_str(); }
-
 private:
     size_t type2size(DataType type) { return type == DataType::kFLOAT ? sizeof(float) : sizeof(__half); }
 
-    template<typename T> void write(char*& buffer, const T& val) const
+    template<typename T> void write(char*& buffer, const T& val)
     {
         *reinterpret_cast<T*>(buffer) = val;
         buffer += sizeof(T);
     }
 
-    template<typename T> T read(const char*& buffer, T& val) const
+    template<typename T> void read(const char*& buffer, T& val)
     {
         val = *reinterpret_cast<const T*>(buffer);
         buffer += sizeof(T);
-        return val;
     }
 
     void* copyToDevice(const void* data, size_t count)
@@ -403,66 +259,265 @@ private:
     cudnnHandle_t mCudnn;
     cublasHandle_t mCublas;
     size_t mNbInputChannels=0, mInputWidth=0, mInputHeight=0;
-    std::string mNamespace = "";
 };
 
 
-class NearestNeighborUpsamplingPluginCreator: public IPluginCreator
+class BilinearUpsamplingPlugin : public IPluginExt
 {
 public:
-    NearestNeighborUpsamplingPluginCreator()
+    BilinearUpsamplingPlugin(const Weights *weights, size_t nbWeights)
     {
-        std::cout << "Create plugin creator" << std::endl;
+        std::cout << "Init from weights" << std::endl;
+        std::cout << "I have " << nbWeights << " weights" << endl;
+        std::cout << "weights ptr is " << weights << std::endl;
     }
 
-    ~NearestNeighborUpsamplingPluginCreator() {}
-
-    const char* getPluginName() const override 
+    BilinearUpsamplingPlugin(const void* data, size_t length)
     {
-        std::cout << "get plugin name" << std::endl;
-        return "ResizeNearestNeighbor"; 
+        std::cout << "Init from data and length" << std::endl;
+        const char* d = static_cast<const char*>(data), *a = d;
+        //read(d, mNbInputChannels);
+        //read(d, mNbOutputChannels);
+        // read the rest from d
+        assert(d == a + length);
     }
 
-    const char* getPluginVersion() const override
+    ~BilinearUpsamplingPlugin()
     {
-        std::cout << "get plugin version" << std::endl;
-        return "1";
+        std::cout << "delete plugin" << std::endl;
     }
 
-    const PluginFieldCollection* getFieldNames() override { return &mFC; }
-
-    IPluginV2* createPlugin(const char* name, const PluginFieldCollection* fc) override
+    int getNbOutputs() const override
     {
-        std::cout << "create plugin using the creator" << std::endl;
-        std::cout << "name is " << name << std::endl;
-        return new NearestNeighborUpsamplingPlugin();
+        std::cout << "get number of outputs" << std::endl;
+        return 1;
     }
 
-    IPluginV2* deserializePlugin(const char* name, const void* serialData, size_t serialLength) override
+    Dims getOutputDimensions(int index, const Dims* inputs, int nbInputDims) override
     {
-        std::cout << "deserialize plugin using the creator" << std::endl;
-        //This object will be deleted when the network is destroyed, which will
-        //call Concat::destroy()
-        return new NearestNeighborUpsamplingPlugin(serialData, serialLength);
+        std::cout << "Get output dimensions" << std::endl;
+        std::cout << "input dims are: " << inputs[0].d[0] << ' ' << inputs[0].d[1] << ' ' << inputs[0].d[2] << std::endl;
+        std::cout << "index is: " << index << std::endl;
+        std::cout << "nbinputdims: " << nbInputDims << std::endl;
+        assert(index == 0 && nbInputDims == 1 && inputs[0].nbDims == 3);
+        return Dims3(inputs[0].d[0], 2 * inputs[0].d[1], 2 * inputs[0].d[2]);
     }
 
-    void setPluginNamespace(const char* libNamespace) override { mNamespace = libNamespace; }
+    bool supportsFormat(DataType type, PluginFormat format) const override 
+    { 
+        std::cout << "supports format" << std::endl;
+        return (type == DataType::kFLOAT || type == DataType::kHALF) && format == PluginFormat::kNCHW; 
+    }
 
-    const char* getPluginNamespace() const override { return mNamespace.c_str(); }
+    void configureWithFormat(const Dims* inputDims, int nbInputs, const Dims* outputDims, int nbOutputs, DataType type, PluginFormat format, int maxBatchSize) override
+    {
+        std::cout << "configure with format" << std::endl;
+        assert((type == DataType::kFLOAT || type == DataType::kHALF) && format == PluginFormat::kNCHW);
+        mDataType = type;
+    }
+
+    int initialize() override
+    {
+        std::cout << "Initialize plugin" << std::endl;
+        CHECK(cudnnCreate(&mCudnn));// initialize cudnn and cublas
+        CHECK(cublasCreate(&mCublas));
+        // write below code for custom variables
+        return 0;
+    }
+
+    virtual void terminate() override
+    {
+        std::cout << "terminate plugin" << std::endl;
+        CHECK(cublasDestroy(mCublas));
+        CHECK(cudnnDestroy(mCudnn));
+        // write below code for custom variables
+    }
+
+    virtual size_t getWorkspaceSize(int maxBatchSize) const override
+    {
+        std::cout << "get workspace size of plugin" << std::endl;
+        return 0;
+    }
+
+    virtual int enqueue(int batchSize, const void*const * inputs, void** outputs, void* workspace, cudaStream_t stream) override
+    {
+        std::cout << "enquque plugin" << std::endl;
+        float onef{1.0f}, zerof{0.0f};
+        __half oneh = fp16::__float2half(1.0f), zeroh = fp16::__float2half(0.0f);
+
+        cublasSetStream(mCublas, stream);
+        cudnnSetStream(mCudnn, stream);
+        //write below code for custom variables  
+        return 0;
+    }
+
+    virtual size_t getSerializationSize() override
+    {
+        std::cout << "get serialization size of plugin" << std::endl;
+        // size of the layer weights
+        return 0;
+    }
+
+    virtual void serialize(void* buffer) override
+    {
+        std::cout << "serialize" << std::endl;
+        char* d = static_cast<char*>(buffer), *a = d;
+
+        //write(d, mNbInputChannels);
+        //write(d, mNbOutputChannels);
+        write(d, mDataType);
+        //write here code for custom variables
+        assert(d == a + getSerializationSize());
+    }
+
 private:
-    static PluginFieldCollection mFC;
-    static std::vector<PluginField> mPluginAttributes;
-    std::string mNamespace = "";
+    size_t type2size(DataType type) { return type == DataType::kFLOAT ? sizeof(float) : sizeof(__half); }
+
+    template<typename T> void write(char*& buffer, const T& val)
+    {
+        *reinterpret_cast<T*>(buffer) = val;
+        buffer += sizeof(T);
+    }
+
+    template<typename T> void read(const char*& buffer, T& val)
+    {
+        val = *reinterpret_cast<const T*>(buffer);
+        buffer += sizeof(T);
+    }
+
+    void* copyToDevice(const void* data, size_t count)
+    {
+        void* deviceData;
+        CHECK(cudaMalloc(&deviceData, count));
+        CHECK(cudaMemcpy(deviceData, data, count, cudaMemcpyHostToDevice));
+        return deviceData;
+    }
+
+    void convertAndCopyToDevice(void*& deviceWeights, const Weights& weights)
+    {
+        if (weights.type != mDataType) // Weights are converted in host memory first, if the type does not match
+        {
+            size_t size = weights.count*(mDataType == DataType::kFLOAT ? sizeof(float) : sizeof(__half));
+            void* buffer = malloc(size);
+            for (int64_t v = 0; v < weights.count; ++v)
+                if (mDataType == DataType::kFLOAT)
+                    static_cast<float*>(buffer)[v] = fp16::__half2float(static_cast<const __half*>(weights.values)[v]);
+                else
+                    static_cast<__half*>(buffer)[v] = fp16::__float2half(static_cast<const float*>(weights.values)[v]);
+
+            deviceWeights = copyToDevice(buffer, size);
+            free(buffer);
+        }
+        else
+            deviceWeights = copyToDevice(weights.values, weights.count * type2size(mDataType));
+    }
+
+    void convertAndCopyToBuffer(char*& buffer, const Weights& weights)
+    {
+        if (weights.type != mDataType)
+            for (int64_t v = 0; v < weights.count; ++v)
+                if (mDataType == DataType::kFLOAT)
+                    reinterpret_cast<float*>(buffer)[v] = fp16::__half2float(static_cast<const __half*>(weights.values)[v]);
+                else
+                    reinterpret_cast<__half*>(buffer)[v] = fp16::__float2half(static_cast<const float*>(weights.values)[v]);
+        else
+            memcpy(buffer, weights.values, weights.count * type2size(mDataType));
+        buffer += weights.count * type2size(mDataType);
+    }
+
+    void deserializeToDevice(const char*& hostBuffer, void*& deviceWeights, size_t size)
+    {
+        deviceWeights = copyToDevice(hostBuffer, size);
+        hostBuffer += size;
+    }
+
+    DataType mDataType{DataType::kFLOAT};
+    cudnnHandle_t mCudnn;
+    cublasHandle_t mCublas;
+    //size_t mNbInputChannels=0, mNbOutputChannels=0;
 };
 
-PluginFieldCollection NearestNeighborUpsamplingPluginCreator::mFC{};
-REGISTER_TENSORRT_PLUGIN(NearestNeighborUpsamplingPluginCreator);
+
+class PluginFactory : public nvinfer1::IPluginFactory, public nvuffparser::IPluginFactory
+{
+public:
+    virtual nvinfer1::IPlugin* createPlugin(const char* layerName, const nvinfer1::Weights* weights, int nbWeights, const nvuffparser::FieldCollection fc) override
+    {
+        std::cout << "createPlugin (layerName, weights, nbWeights)" << std::endl;
+        std::cout << "name is " << layerName << std::endl;
+        if (isBilinearPlugin(layerName))
+        {
+            mPluginResizeBilinear = std::unique_ptr<BilinearUpsamplingPlugin>(new BilinearUpsamplingPlugin(weights, nbWeights));
+            return mPluginResizeBilinear.get();
+        }
+        else if (isNearestPlugin(layerName))
+        {
+            mPluginResizeNearest = std::unique_ptr<NearestNeighborUpsamplingPlugin>(new NearestNeighborUpsamplingPlugin(weights, nbWeights));
+            return mPluginResizeNearest.get();
+        }
+        else
+        {
+            assert(0);
+            return nullptr;
+        }
+    }
+
+    IPlugin* createPlugin(const char* layerName, const void* serialData, size_t serialLength) override
+    {
+        std::cout << "createPlugin (layerName, serialData, serialLength)" << std::endl;
+        std::cout << "name is " << layerName << std::endl;
+        std::cout << "length is " << serialLength << std::endl;
+        if (isBilinearPlugin(layerName))
+        {
+            mPluginResizeBilinear = std::unique_ptr<BilinearUpsamplingPlugin>(new BilinearUpsamplingPlugin(serialData, serialLength));
+            return mPluginResizeBilinear.get();
+        }
+        else if (isNearestPlugin(layerName))
+        {
+            mPluginResizeNearest = std::unique_ptr<NearestNeighborUpsamplingPlugin>(new NearestNeighborUpsamplingPlugin(serialData, serialLength));
+            return mPluginResizeNearest.get();
+        }
+    }
+
+    bool isPlugin(const char* name) override
+    {
+        std::cout << "check to be plugin: " << name << std::endl;
+        return isBilinearPlugin(name) || isNearestPlugin(name);
+    }
+
+    bool startsWith(const char* name, const char* prefix)
+    {
+        return (!strncmp(name, prefix, strlen(prefix)));
+    }
+
+    bool isBilinearPlugin(const char* name)
+    {
+        return (startsWith(name, "_ResizeBilinear"));
+    }
+
+    bool isNearestPlugin(const char* name)
+    {
+        return (startsWith(name, "_ResizeNearestNeighbor"));
+    }
+
+    // The application has to destroy the plugin when it knows it's safe to do so.
+    void destroyPlugin()
+    {
+        std::cout << "destroy plugin factory" << std::endl;
+        mPluginResizeBilinear.reset();
+        mPluginResizeNearest.reset();
+    }
+
+    std::unique_ptr<BilinearUpsamplingPlugin> mPluginResizeBilinear{nullptr};
+    std::unique_ptr<NearestNeighborUpsamplingPlugin> mPluginResizeNearest{nullptr};
+};
+
 
 int main(int argc, char* argv[])
 {
     samplesCommon::parseArgs(args, argc, argv);
     const int N = 1;
-    auto fileName = locateFile("test_upsampling.uff");
+    auto fileName = locateFile("test_upsampling_single.uff");
 
     auto parser = createUffParser();
     parser->registerInput("Placeholder", DimsCHW(3, 240, 320), UffInputOrder::kNCHW);
@@ -471,10 +526,13 @@ int main(int argc, char* argv[])
     BatchStream calibrationStream(CAL_BATCH_SIZE, NB_CAL_BATCHES);
     IHostMemory* trtModelStream{nullptr};
 
-    ICudaEngine* tmpEngine = loadModelAndCreateEngine(fileName.c_str(), N, parser, trtModelStream);
+    PluginFactory pluginFactorySerialize;
+    std::cout << "Plugin factory created" << std::endl;
+    ICudaEngine* tmpEngine = loadModelAndCreateEngine(fileName.c_str(), N, parser, &pluginFactorySerialize, trtModelStream);
     assert(tmpEngine != nullptr);
     assert(trtModelStream != nullptr);
     tmpEngine->destroy();
+    pluginFactorySerialize.destroyPlugin();
 
     // save the engine
     /*std::ofstream p("sampleUffFCRNEngine.trt");
@@ -491,45 +549,13 @@ int main(int argc, char* argv[])
     IRuntime* runtime = createInferRuntime(gLogger);
     std::cout << "Runtime created" << std::endl;
     assert(runtime != nullptr);
-    ICudaEngine* engine = runtime->deserializeCudaEngine(trtModelStream->data(), trtModelStream->size(), nullptr);
+    PluginFactory pluginFactory;
+    std::cout << "Plugin factory created" << std::endl;
+    ICudaEngine* engine = runtime->deserializeCudaEngine(trtModelStream->data(), trtModelStream->size(), &pluginFactory);
     std::cout << "engine created" << std::endl;
     assert(engine != nullptr);
     trtModelStream->destroy();
     IExecutionContext* context = engine->createExecutionContext();
     assert(context != nullptr);
-
-    // Read sample image
-    samplesCommon::PPM<INPUT_C, INPUT_H, INPUT_W> image;
-    readPPMFile("bus.ppm", image);
-    std::cout << "PPM image readed" << std::endl;
-    vector<float> data(N * INPUT_C * INPUT_H * INPUT_W);
-    for (int c = 0; c < INPUT_C; ++c)
-    {
-        for (unsigned j = 0, volChl = INPUT_H * INPUT_W; j < volChl; ++j)
-        {
-            data[c * volChl + j] = float(image.buffer[j * INPUT_C + c]) / 255.0;
-        }
-    }
-    std::cout << "Data created" << std::endl;
-    std::cout << "Data size: " << data.size() << std::endl;
-    std::cout << "First data pixel: " << data[0] << std::endl;
-
-    // Execute engine
-    std::vector<float> output(N * OUTPUT_C * OUTPUT_W * OUTPUT_H);
-    doInference(*context, &data[0], &output[0], 1);
-
-    // Write result on disk
-    int OUTPUT_SIZE = N * OUTPUT_C * OUTPUT_H * OUTPUT_W;
-    uint8_t* outputPixels = new uint8_t[OUTPUT_SIZE];
-    for (int i = 0; i < OUTPUT_SIZE; i++)
-        outputPixels[i] = uint8_t(output[i] * 255.0);
-    std::cout << "First output pixel: " << int(outputPixels[0]) << std::endl;
-    std::ofstream outfile("bus_upsampled.ppm", std::ofstream::binary);
-    outfile << "P6"
-            << "\n"
-            << OUTPUT_W << " " << OUTPUT_H << "\n"
-            << 255 << "\n";
-    outfile.write(reinterpret_cast<char*>(outputPixels), OUTPUT_SIZE);
-    delete outputPixels;
     return EXIT_SUCCESS;
 }

@@ -10,16 +10,16 @@
 #include <vector>
 
 #include "BatchStreamPPM.h"
-#include "NvInferPlugin.h"
 #include "NvUffParser.h"
 #include "common.h"
+#include "argsParser.h"
+#include "NvInferPlugin.h"
 
 using namespace nvinfer1;
 using namespace nvuffparser;
-using namespace plugin;
 
 static Logger gLogger;
-static samples_common::Args args;
+static samplesCommon::Args args;
 
 #define RETURN_AND_LOG(ret, severity, message)                                 \
     do                                                                         \
@@ -43,7 +43,7 @@ static constexpr int FIRST_CAL_BATCH = 0, NB_CAL_BATCHES = 10;
 const int concatAxis[2] = {1, 1};
 const bool ignoreBatch[2] = {false, false};
 
-DetectionOutputParameters detectionOutputParam{true, false, 0, OUTPUT_CLS_SIZE, 200, 100, 0.5, 0.6, CodeTypeSSD::TF_CENTER, {0, 2, 1}, true, true};
+DetectionOutputParameters detectionOutputParam{true, false, 0, OUTPUT_CLS_SIZE, 100, 100, 0.5, 0.6, CodeTypeSSD::TF_CENTER, {0, 2, 1}, true, true};
 
 // Visualization
 const float visualizeThreshold = 0.5;
@@ -51,10 +51,10 @@ const float visualizeThreshold = 0.5;
 void printOutput(int64_t eltCount, DataType dtype, void* buffer)
 {
     std::cout << eltCount << " eltCount" << std::endl;
-    assert(samples_common::getElementSize(dtype) == sizeof(float));
+    assert(samplesCommon::getElementSize(dtype) == sizeof(float));
     std::cout << "--- OUTPUT ---" << std::endl;
 
-    size_t memSize = eltCount * samples_common::getElementSize(dtype);
+    size_t memSize = eltCount * samplesCommon::getElementSize(dtype);
     float* outputs = new float[eltCount];
     CHECK(cudaMemcpyAsync(outputs, buffer, memSize, cudaMemcpyDeviceToHost));
 
@@ -125,7 +125,7 @@ calculateBindingBufferSizes(const ICudaEngine& engine, int nbBindings, int batch
         Dims dims = engine.getBindingDimensions(i);
         DataType dtype = engine.getBindingDataType(i);
 
-        int64_t eltCount = samples_common::volume(dims) * batchSize;
+        int64_t eltCount = samplesCommon::volume(dims) * batchSize;
         sizes.push_back(std::make_pair(eltCount, dtype));
     }
 
@@ -133,15 +133,13 @@ calculateBindingBufferSizes(const ICudaEngine& engine, int nbBindings, int batch
 }
 
 ICudaEngine* loadModelAndCreateEngine(const char* uffFile, int maxBatchSize,
-                                      IUffParser* parser, nvuffparser::IPluginFactory* pluginFactory,
-                                      IInt8Calibrator* calibrator, IHostMemory*& trtModelStream)
+                                      IUffParser* parser, IInt8Calibrator* calibrator, IHostMemory*& trtModelStream)
 {
     // Create the builder
     IBuilder* builder = createInferBuilder(gLogger);
 
     // Parse the UFF model to populate the network, then set the outputs.
     INetworkDefinition* network = builder->createNetwork();
-    parser->setPluginFactory(pluginFactory);
 
     std::cout << "Begin parsing model..." << std::endl;
     if (!parser->parse(uffFile, *network, nvinfer1::DataType::kFLOAT))
@@ -191,7 +189,7 @@ void doInference(IExecutionContext& context, float* inputData, float* detectionO
     for (int i = 0; i < nbBindings; ++i)
     {
         auto bufferSizesOutput = buffersSizes[i];
-        buffers[i] = samples_common::safeCudaMalloc(bufferSizesOutput.first * samples_common::getElementSize(bufferSizesOutput.second));
+        buffers[i] = samplesCommon::safeCudaMalloc(bufferSizesOutput.first * samplesCommon::getElementSize(bufferSizesOutput.second));
     }
 
     // In order to bind the buffers, we need to know the names of the input and output tensors.
@@ -235,7 +233,7 @@ void doInference(IExecutionContext& context, float* inputData, float* detectionO
     CHECK(cudaFree(buffers[outputIndex1]));
 }
 
-class FlattenConcat : public IPlugin
+class FlattenConcat : public IPluginV2
 {
 public:
     FlattenConcat(int concatAxis, bool ignoreBatch)
@@ -244,10 +242,21 @@ public:
     {
         assert(mConcatAxisID == 1 || mConcatAxisID == 2 || mConcatAxisID == 3);
     }
+    //clone constructor
+    FlattenConcat(int concatAxis, bool ignoreBatch, int numInputs, int outputConcatAxis, int* inputConcatAxis)
+        : mIgnoreBatch(ignoreBatch)
+        , mConcatAxisID(concatAxis)
+        , mOutputConcatAxis(outputConcatAxis)
+        , mNumInputs(numInputs)
+    {
+        CHECK(cudaMallocHost((void**) &mInputConcatAxis, mNumInputs * sizeof(int)));
+        for (int i = 0; i < mNumInputs; ++i)
+            mInputConcatAxis[i] = inputConcatAxis[i];
+    }
 
     FlattenConcat(const void* data, size_t length)
     {
-        const char *d = reinterpret_cast<const char *>(data), *a = d;
+        const char *d = reinterpret_cast<const char*>(data), *a = d;
         mIgnoreBatch = read<bool>(d);
         mConcatAxisID = read<int>(d);
         assert(mConcatAxisID == 1 || mConcatAxisID == 2 || mConcatAxisID == 3);
@@ -266,8 +275,10 @@ public:
     }
     ~FlattenConcat()
     {
-        CHECK(cudaFreeHost(mInputConcatAxis));
-        CHECK(cudaFreeHost(mCopySize));
+        if (mInputConcatAxis)
+            CHECK(cudaFreeHost(mInputConcatAxis));
+        if (mCopySize)
+            CHECK(cudaFreeHost(mCopySize));
     }
     int getNbOutputs() const override { return 1; }
 
@@ -290,9 +301,12 @@ public:
         {
             int flattenInput = 0;
             assert(inputs[i].nbDims == 3);
-            if (mConcatAxisID != 1) assert(inputs[i].d[0] == inputs[0].d[0]);
-            if (mConcatAxisID != 2) assert(inputs[i].d[1] == inputs[0].d[1]);
-            if (mConcatAxisID != 3) assert(inputs[i].d[2] == inputs[0].d[2]);
+            if (mConcatAxisID != 1)
+                assert(inputs[i].d[0] == inputs[0].d[0]);
+            if (mConcatAxisID != 2)
+                assert(inputs[i].d[1] == inputs[0].d[1]);
+            if (mConcatAxisID != 3)
+                assert(inputs[i].d[2] == inputs[0].d[2]);
             flattenInput = inputs[i].d[0] * inputs[i].d[1] * inputs[i].d[2];
             mInputConcatAxis[i] = flattenInput;
             mOutputConcatAxis += mInputConcatAxis[i];
@@ -322,7 +336,8 @@ public:
         assert(mConcatAxisID != 0);
         numConcats = std::accumulate(mCHW.d, mCHW.d + mConcatAxisID - 1, 1, std::multiplies<int>());
 
-        if (!mIgnoreBatch) numConcats *= batchSize;
+        if (!mIgnoreBatch)
+            numConcats *= batchSize;
 
         float* output = reinterpret_cast<float*>(outputs[0]);
         int offset = 0;
@@ -347,14 +362,14 @@ public:
         return 0;
     }
 
-    size_t getSerializationSize() override
+    size_t getSerializationSize() const override
     {
         return sizeof(bool) + sizeof(int) * (3 + mNumInputs) + sizeof(nvinfer1::Dims) + (sizeof(mCopySize) * mNumInputs);
     }
 
-    void serialize(void* buffer) override
+    void serialize(void* buffer) const override
     {
-        char *d = reinterpret_cast<char *>(buffer), *a = d;
+        char *d = reinterpret_cast<char*>(buffer), *a = d;
         write(d, mIgnoreBatch);
         write(d, mConcatAxisID);
         write(d, mOutputConcatAxis);
@@ -371,7 +386,7 @@ public:
         assert(d == a + getSerializationSize());
     }
 
-    void configure(const Dims* inputs, int nbInputs, const Dims* outputs, int nbOutputs, int) override
+    void configureWithFormat(const Dims* inputs, int nbInputs, const Dims* outputDims, int nbOutputs, nvinfer1::DataType type, nvinfer1::PluginFormat format, int maxBatchSize) override
     {
         assert(nbOutputs == 1);
         mCHW = inputs[0];
@@ -383,9 +398,28 @@ public:
         }
     }
 
+    bool supportsFormat(DataType type, PluginFormat format) const override
+    {
+        return (type == DataType::kFLOAT && format == PluginFormat::kNCHW);
+    }
+    const char* getPluginType() const override { return "FlattenConcat_TRT"; }
+
+    const char* getPluginVersion() const override { return "1"; }
+
+    void destroy() override { delete this; }
+
+    IPluginV2* clone() const override
+    {
+        return new FlattenConcat(mConcatAxisID, mIgnoreBatch, mNumInputs, mOutputConcatAxis, mInputConcatAxis);
+    }
+
+    void setPluginNamespace(const char* libNamespace) override { mNamespace = libNamespace; }
+
+    const char* getPluginNamespace() const override { return mNamespace.c_str(); }
+
 private:
     template <typename T>
-    void write(char*& buffer, const T& val)
+    void write(char*& buffer, const T& val) const
     {
         *reinterpret_cast<T*>(buffer) = val;
         buffer += sizeof(T);
@@ -399,260 +433,98 @@ private:
         return val;
     }
 
-    size_t* mCopySize;
+    size_t* mCopySize = nullptr;
     bool mIgnoreBatch{false};
-    int mConcatAxisID, mOutputConcatAxis, mNumInputs;
-    int* mInputConcatAxis;
+    int mConcatAxisID{0}, mOutputConcatAxis{0}, mNumInputs{0};
+    int* mInputConcatAxis = nullptr;
     nvinfer1::Dims mCHW;
     cublasHandle_t mCublas;
+    std::string mNamespace;
 };
 
-// Integration for serialization.
-class PluginFactory : public nvinfer1::IPluginFactory, public nvuffparser::IPluginFactory
+namespace
+{
+const char* FLATTENCONCAT_PLUGIN_VERSION{"1"};
+const char* FLATTENCONCAT_PLUGIN_NAME{"FlattenConcat_TRT"};
+} // namespace
+
+class FlattenConcatPluginCreator : public IPluginCreator
 {
 public:
-    std::unordered_map<std::string, int> concatIDs = {
-        std::make_pair("_concat_box_loc", 0),
-        std::make_pair("_concat_box_conf", 1)};
-
-        virtual nvinfer1::IPlugin* createPlugin(const char* layerName, const nvinfer1::Weights* weights, int nbWeights, const nvuffparser::FieldCollection fc) override
-        {
-            std::cout << "createPlugin (layerName, weights, nbWeights)" << std::endl;
-            std::cout << "layerName: " << layerName << std::endl;
-            assert(isPlugin(layerName));
-
-            const nvuffparser::FieldMap* fields = fc.fields;
-            int nbFields = fc.nbFields;
-
-            if(!strcmp(layerName, "_PriorBox"))
-            {
-                assert(mPluginPriorBox == nullptr);
-                assert(nbWeights == 0 && weights == nullptr);
-
-                float minScale = 0.2, maxScale = 0.95;
-                int numLayers;
-                std::vector<float> aspectRatios;
-                std::vector<int> fMapShapes;
-                std::vector<float> layerVariances;
-
-                for(int i = 0; i < nbFields; i++)
-                {
-                    const char* attr_name = fields[i].name;
-                    if (strcmp(attr_name, "numLayers") == 0)
-                    {
-                        assert(fields[i].type == FieldType::kINT32);
-                        numLayers = (int)(*(static_cast<const int*>(fields[i].data)));
-                    }
-                    else if(strcmp(attr_name, "minScale") == 0)
-                    {
-                        assert(fields[i].type == FieldType::kFLOAT);
-                        minScale = (float)(*(static_cast<const double*>(fields[i].data)));
-                    }
-                    else if(strcmp(attr_name, "maxScale") == 0)
-                    {
-                        assert(fields[i].type == FieldType::kFLOAT);
-                        maxScale = (float)(*(static_cast<const double*>(fields[i].data)));
-                    }
-                    else if(strcmp(attr_name, "aspectRatios")==0)
-                    {
-                        assert(fields[i].type == FieldType::kFLOAT);
-                        int size = fields[i].length;
-                        aspectRatios.reserve(size);
-                        const double *aR = static_cast<const double*>(fields[i].data);
-                        for(int j=0; j < size; j++)
-                        {
-                            aspectRatios.push_back(*aR);
-                            aR++;
-                        }
-                    }
-                    else if(strcmp(attr_name, "featureMapShapes")==0)
-                    {
-                        assert(fields[i].type == FieldType::kINT32);
-                        int size = fields[i].length;
-                        fMapShapes.reserve(size);
-                        const int *fMap = static_cast<const int*>(fields[i].data);
-                        for(int j=0; j<size; j++){
-                            fMapShapes.push_back(*fMap);
-                            fMap++;
-                        }
-                    }
-                    else if(strcmp(attr_name, "layerVariances")==0)
-                    {
-                        assert(fields[i].type == FieldType::kFLOAT);
-                        int size = fields[i].length;
-                        layerVariances.reserve(size);
-                        const double *lVar = static_cast<const double*>(fields[i].data);
-                        for(int j=0; j<size; j++){
-                            layerVariances.push_back(*lVar);
-                            lVar++;
-                        }
-                    }
-                }
-                // Num layers should match the number of feature maps from which boxes are predicted.
-                assert(numLayers > 0);
-                assert((int)fMapShapes.size() == numLayers);
-                assert(aspectRatios.size() > 0);
-                assert(layerVariances.size() == 4);
-
-                // Reducing the number of boxes predicted by the first layer.
-                // This is in accordance with the standard implementation.
-                vector<float> firstLayerAspectRatios;
-
-                int numFirstLayerARs = 3;
-                for(int i = 0; i < numFirstLayerARs; ++i){
-                    firstLayerAspectRatios.push_back(aspectRatios[i]);
-                }
-                // A comprehensive list of box parameters that are required by anchor generator
-                GridAnchorParameters boxParams[numLayers];
-                for(int i = 0; i < numLayers ; i++)
-                {
-                    if(i == 0)
-                        boxParams[i] = {minScale, maxScale, firstLayerAspectRatios.data(), (int)firstLayerAspectRatios.size(), fMapShapes[i], fMapShapes[i], {layerVariances[0], layerVariances[1], layerVariances[2], layerVariances[3]}};
-                    else
-                        boxParams[i] = {minScale, maxScale, aspectRatios.data(), (int)aspectRatios.size(), fMapShapes[i], fMapShapes[i], {layerVariances[0], layerVariances[1], layerVariances[2], layerVariances[3]}};
-                }
-
-                mPluginPriorBox = std::unique_ptr<INvPlugin, void(*)(INvPlugin*)>(createSSDAnchorGeneratorPlugin(boxParams, numLayers), nvPluginDeleter);
-                return mPluginPriorBox.get();
-            }
-            else if(concatIDs.find(std::string(layerName)) != concatIDs.end())
-            {
-                const int i = concatIDs[layerName];
-                assert(mPluginFlattenConcat[i] == nullptr);
-                assert(nbWeights == 0 && weights == nullptr);
-                mPluginFlattenConcat[i] = std::unique_ptr<FlattenConcat>(new FlattenConcat(concatAxis[i], ignoreBatch[i]));
-                return mPluginFlattenConcat[i].get();
-            }
-            else if(!strcmp(layerName, "_concat_priorbox"))
-            {
-                assert(mPluginConcat == nullptr);
-                assert(nbWeights == 0 && weights == nullptr);
-                mPluginConcat = std::unique_ptr<INvPlugin, void(*)(INvPlugin*)>(createConcatPlugin(2, true), nvPluginDeleter);
-                return mPluginConcat.get();
-            }
-            else if(!strcmp(layerName, "_NMS"))
-            {
-
-                assert(mPluginDetectionOutput == nullptr);
-                assert(nbWeights == 0 && weights == nullptr);
-
-                 // Fill the custom attribute values to the built-in plugin according to the types
-                for(int i = 0; i < nbFields; ++i)
-                {
-                    const char* attr_name = fields[i].name;
-                    if (strcmp(attr_name, "iouThreshold") == 0)
-                    {
-                        detectionOutputParam.nmsThreshold =(float)(*(static_cast<const double*>(fields[i].data)));
-                    }
-                    else if(strcmp(attr_name, "numClasses") == 0)
-                    {
-                        assert(fields[i].type == FieldType::kINT32);
-                        detectionOutputParam.numClasses = (int)(*(static_cast<const int*>(fields[i].data)));
-                    }
-                    else if(strcmp(attr_name, "maxDetectionsPerClass") == 0)
-                    {
-                        assert(fields[i].type == FieldType::kINT32);
-                        detectionOutputParam.topK = (int)(*(static_cast<const int*>(fields[i].data)));
-                    }
-                    else if(strcmp(attr_name, "scoreConverter") == 0)
-                    {
-                        std::string scoreConverter(static_cast<const char*>(fields[i].data), fields[i].length);
-                        if(scoreConverter=="SIGMOID")
-                            detectionOutputParam.confSigmoid = true;
-                    }
-                    else if(strcmp(attr_name, "maxTotalDetections") == 0)
-                    {
-                        assert(fields[i].type == FieldType::kINT32);
-                        detectionOutputParam.keepTopK = (int)(*(static_cast<const int*>(fields[i].data)));
-                    }
-                    else if(strcmp(attr_name, "scoreThreshold") == 0)
-                    {
-                        detectionOutputParam.confidenceThreshold = (float)(*(static_cast<const double*>(fields[i].data)));
-                    }
-                }
-                mPluginDetectionOutput = std::unique_ptr<INvPlugin, void(*)(INvPlugin*)>(createSSDDetectionOutputPlugin(detectionOutputParam), nvPluginDeleter);
-                return mPluginDetectionOutput.get();
-            }
-            else
-            {
-              assert(0);
-              return nullptr;
-            }
-        }
-
-    IPlugin* createPlugin(const char* layerName, const void* serialData, size_t serialLength) override
+    FlattenConcatPluginCreator()
     {
-        std::cout << "createPlugin (layerName, serialData, serialLength)" << std::endl;
-        std::cout << "layerName: " << layerName << std::endl;
-        assert(isPlugin(layerName));
+        std::cout << "create plugin creator" << std::endl;
+        mPluginAttributes.emplace_back(PluginField("axis", nullptr, PluginFieldType::kINT32, 1));
+        mPluginAttributes.emplace_back(PluginField("ignoreBatch", nullptr, PluginFieldType::kINT32, 1));
 
-        if (!strcmp(layerName, "_PriorBox"))
-        {
-            assert(mPluginPriorBox == nullptr);
-            mPluginPriorBox = std::unique_ptr<INvPlugin, void (*)(INvPlugin*)>(createSSDAnchorGeneratorPlugin(serialData, serialLength), nvPluginDeleter);
-            return mPluginPriorBox.get();
-        }
-        else if (concatIDs.find(std::string(layerName)) != concatIDs.end())
-        {
-            const int i = concatIDs[layerName];
-            assert(mPluginFlattenConcat[i] == nullptr);
-            mPluginFlattenConcat[i] = std::unique_ptr<FlattenConcat>(new FlattenConcat(serialData, serialLength));
-            return mPluginFlattenConcat[i].get();
-        }
-        else if (!strcmp(layerName, "_concat_priorbox"))
-        {
-            assert(mPluginConcat == nullptr);
-            mPluginConcat = std::unique_ptr<INvPlugin, void (*)(INvPlugin*)>(createConcatPlugin(serialData, serialLength), nvPluginDeleter);
-            return mPluginConcat.get();
-        }
-        else if (!strcmp(layerName, "_NMS"))
-        {
-            assert(mPluginDetectionOutput == nullptr);
-            mPluginDetectionOutput = std::unique_ptr<INvPlugin, void (*)(INvPlugin*)>(createSSDDetectionOutputPlugin(serialData, serialLength), nvPluginDeleter);
-            return mPluginDetectionOutput.get();
-        }
-        else
-        {
-            assert(0);
-            return nullptr;
-        }
+        mFC.nbFields = mPluginAttributes.size();
+        mFC.fields = mPluginAttributes.data();
     }
 
-    bool isPlugin(const char* name) override
-    {
-        std::cout << "check to be plugin: " << name << std::endl;
-        return !strcmp(name, "_PriorBox")
-            || concatIDs.find(std::string(name)) != concatIDs.end()
-            || !strcmp(name, "_concat_priorbox")
-            || !strcmp(name, "_NMS")
-            || !strcmp(name, "mbox_conf_reshape");
-    }
+    ~FlattenConcatPluginCreator() {}
 
-    // The application has to destroy the plugin when it knows it's safe to do so.
-    void destroyPlugin()
+    const char* getPluginName() const override { return FLATTENCONCAT_PLUGIN_NAME; }
+
+    const char* getPluginVersion() const override { return FLATTENCONCAT_PLUGIN_VERSION; }
+
+    const PluginFieldCollection* getFieldNames() override { return &mFC; }
+
+    IPluginV2* createPlugin(const char* name, const PluginFieldCollection* fc) override
     {
-        for (unsigned i = 0; i < concatIDs.size(); ++i)
+        std::cout << "create plugin using FlattenConcatPluginCreator" << std::endl;
+        std::cout << "name is " << name << std::endl;
+        const PluginField* fields = fc->fields;
+        for (int i = 0; i < fc->nbFields; ++i)
         {
-            mPluginFlattenConcat[i].reset();
+            const char* attrName = fields[i].name;
+            if (!strcmp(attrName, "axis"))
+            {
+                assert(fields[i].type == PluginFieldType::kINT32);
+                mConcatAxisID = *(static_cast<const int*>(fields[i].data));
+            }
+            if (!strcmp(attrName, "ignoreBatch"))
+            {
+                assert(fields[i].type == PluginFieldType::kINT32);
+                mIgnoreBatch = *(static_cast<const bool*>(fields[i].data));
+            }
         }
-        mPluginConcat.reset();
-        mPluginPriorBox.reset();
-        mPluginDetectionOutput.reset();
+
+        return new FlattenConcat(mConcatAxisID, mIgnoreBatch);
     }
 
-    void (*nvPluginDeleter)(INvPlugin*){[](INvPlugin* ptr) { ptr->destroy(); }};
-    std::unique_ptr<INvPlugin, void (*)(INvPlugin*)> mPluginPriorBox{nullptr, nvPluginDeleter};
-    std::unique_ptr<INvPlugin, void (*)(INvPlugin*)> mPluginDetectionOutput{nullptr, nvPluginDeleter};
-    std::unique_ptr<INvPlugin, void (*)(INvPlugin*)> mPluginConcat{nullptr, nvPluginDeleter};
-    std::unique_ptr<FlattenConcat> mPluginFlattenConcat[2]{nullptr, nullptr};
+    IPluginV2* deserializePlugin(const char* name, const void* serialData, size_t serialLength) override
+    {
+
+        //This object will be deleted when the network is destroyed, which will
+        //call Concat::destroy()
+        return new FlattenConcat(serialData, serialLength);
+    }
+
+    void setPluginNamespace(const char* libNamespace) override { mNamespace = libNamespace; }
+
+    const char* getPluginNamespace() const override { return mNamespace.c_str(); }
+
+private:
+    static PluginFieldCollection mFC;
+    bool mIgnoreBatch{false};
+    int mConcatAxisID;
+    static std::vector<PluginField> mPluginAttributes;
+    std::string mNamespace = "";
 };
+
+PluginFieldCollection FlattenConcatPluginCreator::mFC{};
+std::vector<PluginField> FlattenConcatPluginCreator::mPluginAttributes;
+
+REGISTER_TENSORRT_PLUGIN(FlattenConcatPluginCreator);
 
 int main(int argc, char* argv[])
 {
     // Parse command-line arguments.
-    samples_common::parseArgs(args, argc, argv);
+    samplesCommon::parseArgs(args, argc, argv);
 
-    auto fileName = locateFile("sample_ssd.uff");
+    initLibNvInferPlugins(&gLogger, "");
+
+    auto fileName = locateFile("sample_ssd_relu6.uff");
     std::cout << fileName << std::endl;
 
     const int N = 2;
@@ -667,24 +539,22 @@ int main(int argc, char* argv[])
 
     Int8EntropyCalibrator calibrator(calibrationStream, FIRST_CAL_BATCH, "CalibrationTableSSD");
 
-    PluginFactory pluginFactorySerialize;
-    ICudaEngine* tmpEngine = loadModelAndCreateEngine(fileName.c_str(), N, parser, &pluginFactorySerialize, &calibrator, trtModelStream);
+    ICudaEngine* tmpEngine = loadModelAndCreateEngine(fileName.c_str(), N, parser, &calibrator, trtModelStream);
     assert(tmpEngine != nullptr);
     assert(trtModelStream != nullptr);
     tmpEngine->destroy();
-    pluginFactorySerialize.destroyPlugin();
 
     // Read a random sample image.
     srand(unsigned(time(nullptr)));
     // Available images.
     std::vector<std::string> imageList = {"dog.ppm", "bus.ppm"};
-    std::vector<samples_common::PPM<INPUT_C, INPUT_H, INPUT_W>> ppms(N);
+    std::vector<samplesCommon::PPM<INPUT_C, INPUT_H, INPUT_W>> ppms(N);
 
     assert(ppms.size() <= imageList.size());
     std::cout << " Num batches  " << N << std::endl;
     for (int i = 0; i < N; ++i)
     {
-        readPPMFile(imageList[i], ppms[i]);
+        readPPMFile(locateFile(imageList[i]), ppms[i]);
     }
 
     vector<float> data(N * INPUT_C * INPUT_H * INPUT_W);
@@ -693,7 +563,8 @@ int main(int argc, char* argv[])
     {
         for (int c = 0; c < INPUT_C; ++c)
         {
-            for (unsigned j = 0, volChl = INPUT_H * INPUT_W; j < volChl; ++j) {
+            for (unsigned j = 0, volChl = INPUT_H * INPUT_W; j < volChl; ++j)
+            {
                 data[i * volImg + c * volChl + j] = (2.0 / 255.0) * float(ppms[i].buffer[j * INPUT_C + c]) - 1.0;
             }
         }
@@ -704,8 +575,7 @@ int main(int argc, char* argv[])
     std::cout << "*** deserializing" << std::endl;
     IRuntime* runtime = createInferRuntime(gLogger);
     assert(runtime != nullptr);
-    PluginFactory pluginFactory;
-    ICudaEngine* engine = runtime->deserializeCudaEngine(trtModelStream->data(), trtModelStream->size(), &pluginFactory);
+    ICudaEngine* engine = runtime->deserializeCudaEngine(trtModelStream->data(), trtModelStream->size(), nullptr);
     assert(engine != nullptr);
     trtModelStream->destroy();
     IExecutionContext* context = engine->createExecutionContext();
@@ -728,7 +598,8 @@ int main(int argc, char* argv[])
         for (int i = 0; i < keepCount[p]; ++i)
         {
             float* det = &detectionOut[0] + (p * detectionOutputParam.keepTopK + i) * 7;
-            if (det[2] < visualizeThreshold) continue;
+            if (det[2] < visualizeThreshold)
+                continue;
 
             // Output format for each detection is stored in the below order
             // [image_id, label, confidence, xmin, ymin, xmax, ymax]
@@ -737,7 +608,7 @@ int main(int argc, char* argv[])
 
             printf("Detected %s in the image %d (%s) with confidence %f%% and coordinates (%f,%f),(%f,%f).\nResult stored in %s.\n", CLASSES[(int) det[1]].c_str(), int(det[0]), ppms[p].fileName.c_str(), det[2] * 100.f, det[3] * INPUT_W, det[4] * INPUT_H, det[5] * INPUT_W, det[6] * INPUT_H, storeName.c_str());
 
-            samples_common::writePPMFileWithBBox(storeName, ppms[p], {det[3] * INPUT_W, det[4] * INPUT_H, det[5] * INPUT_W, det[6] * INPUT_H});
+            samplesCommon::writePPMFileWithBBox(storeName, ppms[p], {det[3] * INPUT_W, det[4] * INPUT_H, det[5] * INPUT_W, det[6] * INPUT_H});
         }
     }
 
@@ -745,9 +616,6 @@ int main(int argc, char* argv[])
     context->destroy();
     engine->destroy();
     runtime->destroy();
-
-    // Destroy plugins created by factory
-    pluginFactory.destroyPlugin();
 
     return EXIT_SUCCESS;
 }

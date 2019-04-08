@@ -12,17 +12,19 @@ Steps to generate UFF file:
         https://docs.nvidia.com/deeplearning/sdk/tensorrt-api/#python and click on the 'TensorRT Python API' link.
 
     1. Get the pre-trained Tensorflow model (ssd_inception_v2_coco) from:
-        https://github.com/tensorflow/models/blob/master/research/object_detection/g3doc/detection_model_zoo.md
+        http://download.tensorflow.org/models/object_detection/ssd_inception_v2_coco_2017_11_17.tar.gz
 
     2. Call the UFF converter with the preprocessing flag set (-p [config_file]).
         The config.py script specifies the preprocessing operations necessary for SSD TF graph.
         It must be copied to the working directory for the file to be imported properly.
+        The plugin nodes and plugin parameters used in config.py should match the registered plugins
+        in TensorRT. Please read the plugins documentation for more details.
 
-        'convert-to-uff tensorflow --input-file frozen_inference_graph.pb -O NMS -p config.py'
+        'convert-to-uff --input-file frozen_inference_graph.pb -O NMS -p config.py'
 
 This script saves the converted .uff file in the same directory as the input with
 the name frozen_inference_graph.pb.uff. Copy this converted .uff file to the
-data directory as sample_ssd.uff <TensorRT Install>/data/ssd/sample_ssd.uff
+data directory as sample_ssd_relu6.uff <TensorRT Install>/data/ssd/sample_ssd_relu6.uff
 
 The sample also requires a labels .txt file with a list of all labels used to
 train the model. Current example for this network is <TensorRT Install>/data/ssd/ssd_coco_labels.txt

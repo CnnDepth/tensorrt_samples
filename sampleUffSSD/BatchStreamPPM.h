@@ -16,92 +16,84 @@ static constexpr int INPUT_W = 300;
 
 const char* INPUT_BLOB_NAME = "Input";
 
-// Simple PPM (portable pixel map) reader.
-template <int C, int H, int W>
-void readPPMFile(const std::string& filename, samples_common::PPM<C, H, W>& ppm)
-{
-    ppm.fileName = filename;
-    std::ifstream infile(locateFile(filename), std::ifstream::binary);
-    infile >> ppm.magic >> ppm.w >> ppm.h >> ppm.max;
-    infile.seekg(1, infile.cur);
-    infile.read(reinterpret_cast<char*>(ppm.buffer), ppm.w * ppm.h * 3);
-}
-
 class BatchStream
 {
 public:
-	BatchStream(int batchSize, int maxBatches) : mBatchSize(batchSize), mMaxBatches(maxBatches)
-	{
-		mDims = nvinfer1::DimsNCHW{batchSize, 3, 300, 300 };
-		mImageSize = mDims.c() * mDims.h() * mDims.w();
-		mBatch.resize(mBatchSize * mImageSize, 0);
-		mLabels.resize(mBatchSize, 0);
-		mFileBatch.resize(mDims.n() * mImageSize, 0);
-		mFileLabels.resize(mDims.n(), 0);
-		reset(0);
-	}
+    BatchStream(int batchSize, int maxBatches)
+        : mBatchSize(batchSize)
+        , mMaxBatches(maxBatches)
+    {
+        mDims = nvinfer1::DimsNCHW{batchSize, 3, 300, 300};
+        mImageSize = mDims.c() * mDims.h() * mDims.w();
+        mBatch.resize(mBatchSize * mImageSize, 0);
+        mLabels.resize(mBatchSize, 0);
+        mFileBatch.resize(mDims.n() * mImageSize, 0);
+        mFileLabels.resize(mDims.n(), 0);
+        reset(0);
+    }
 
-	void reset(int firstBatch)
-	{
-		mBatchCount = 0;
-		mFileCount = 0;
-		mFileBatchPos = mDims.n();
-		skip(firstBatch);
-	}
+    void reset(int firstBatch)
+    {
+        mBatchCount = 0;
+        mFileCount = 0;
+        mFileBatchPos = mDims.n();
+        skip(firstBatch);
+    }
 
-	bool next()
-	{
-		if (mBatchCount == mMaxBatches)
-			return false;
+    bool next()
+    {
+        if (mBatchCount == mMaxBatches)
+            return false;
 
-		for (int csize = 1, batchPos = 0; batchPos < mBatchSize; batchPos += csize, mFileBatchPos += csize)
-		{
-			assert(mFileBatchPos > 0 && mFileBatchPos <= mDims.n());
-			if (mFileBatchPos == mDims.n() && !update())
-				return false;
+        for (int csize = 1, batchPos = 0; batchPos < mBatchSize; batchPos += csize, mFileBatchPos += csize)
+        {
+            assert(mFileBatchPos > 0 && mFileBatchPos <= mDims.n());
+            if (mFileBatchPos == mDims.n() && !update())
+                return false;
 
-			// copy the smaller of: elements left to fulfill the request, or elements left in the file buffer.
-			csize = std::min(mBatchSize - batchPos, mDims.n() - mFileBatchPos);
-			std::copy_n(getFileBatch() + mFileBatchPos * mImageSize, csize * mImageSize, getBatch() + batchPos * mImageSize);
-		}
-		mBatchCount++;
-		return true;
-	}
+            // copy the smaller of: elements left to fulfill the request, or elements left in the file buffer.
+            csize = std::min(mBatchSize - batchPos, mDims.n() - mFileBatchPos);
+            std::copy_n(getFileBatch() + mFileBatchPos * mImageSize, csize * mImageSize, getBatch() + batchPos * mImageSize);
+        }
+        mBatchCount++;
+        return true;
+    }
 
-	void skip(int skipCount)
-	{
-		if (mBatchSize >= mDims.n() && mBatchSize % mDims.n() == 0 && mFileBatchPos == mDims.n())
-		{
-			mFileCount += skipCount * mBatchSize / mDims.n();
-			return;
-		}
+    void skip(int skipCount)
+    {
+        if (mBatchSize >= mDims.n() && mBatchSize % mDims.n() == 0 && mFileBatchPos == mDims.n())
+        {
+            mFileCount += skipCount * mBatchSize / mDims.n();
+            return;
+        }
 
-		int x = mBatchCount;
-		for (int i = 0; i < skipCount; i++)
-			next();
-		mBatchCount = x;
-	}
+        int x = mBatchCount;
+        for (int i = 0; i < skipCount; i++)
+            next();
+        mBatchCount = x;
+    }
 
-	float *getBatch() { return mBatch.data(); }
-	float *getLabels() { return mLabels.data(); }
-	int getBatchesRead() const { return mBatchCount; }
-	int getBatchSize() const { return mBatchSize; }
-	nvinfer1::DimsNCHW getDims() const { return mDims; }
+    float* getBatch() { return mBatch.data(); }
+    float* getLabels() { return mLabels.data(); }
+    int getBatchesRead() const { return mBatchCount; }
+    int getBatchSize() const { return mBatchSize; }
+    nvinfer1::DimsNCHW getDims() const { return mDims; }
+
 private:
-	float* getFileBatch() { return mFileBatch.data(); }
-	float* getFileLabels() { return mFileLabels.data(); }
+    float* getFileBatch() { return mFileBatch.data(); }
+    float* getFileLabels() { return mFileLabels.data(); }
 
-	bool update()
-	{
+    bool update()
+    {
         std::vector<std::string> fNames;
 
-	    std::ifstream file(locateFile("list.txt"));
-        if(file)
+        std::ifstream file(locateFile("list.txt"));
+        if (file)
         {
-            std::cout  << "Batch #" << mFileCount << "\n";
-            file.seekg(((mBatchCount * mBatchSize))*7);
+            std::cout << "Batch #" << mFileCount << "\n";
+            file.seekg(((mBatchCount * mBatchSize)) * 7);
         }
-        for(int i = 1; i <= mBatchSize; i++)
+        for (int i = 1; i <= mBatchSize; i++)
         {
             std::string sName;
             std::getline(file, sName);
@@ -112,12 +104,12 @@ private:
         }
         mFileCount++;
 
-        std::vector<samples_common::PPM<INPUT_C, INPUT_H, INPUT_W>> ppms(fNames.size());
-        for (uint i = 0; i < fNames.size(); ++i)
+        std::vector<samplesCommon::PPM<INPUT_C, INPUT_H, INPUT_W>> ppms(fNames.size());
+        for (uint32_t i = 0; i < fNames.size(); ++i)
         {
-            readPPMFile(fNames[i], ppms[i]);
+            readPPMFile(locateFile(fNames[i]), ppms[i]);
         }
-        std::vector<float> data(samples_common::volume(mDims));
+        std::vector<float> data(samplesCommon::volume(mDims));
 
         long int volChl = mDims.h() * mDims.w();
 
@@ -134,34 +126,34 @@ private:
 
         std::copy_n(data.data(), mDims.n() * mImageSize, getFileBatch());
 
-		mFileBatchPos = 0;
-		return true;
-	}
+        mFileBatchPos = 0;
+        return true;
+    }
 
-	int mBatchSize{0};
-	int mMaxBatches{0};
-	int mBatchCount{0};
+    int mBatchSize{0};
+    int mMaxBatches{0};
+    int mBatchCount{0};
 
-	int mFileCount{0}, mFileBatchPos{0};
-	int mImageSize{0};
+    int mFileCount{0}, mFileBatchPos{0};
+    int mImageSize{0};
 
-	nvinfer1::DimsNCHW mDims;
-	std::vector<float> mBatch;
-	std::vector<float> mLabels;
-	std::vector<float> mFileBatch;
-	std::vector<float> mFileLabels;
+    nvinfer1::DimsNCHW mDims;
+    std::vector<float> mBatch;
+    std::vector<float> mLabels;
+    std::vector<float> mFileBatch;
+    std::vector<float> mFileLabels;
 };
 
 class Int8EntropyCalibrator : public nvinfer1::IInt8EntropyCalibrator
 {
 public:
     Int8EntropyCalibrator(BatchStream& stream, int firstBatch, std::string calibrationTableName, bool readCache = true)
-        : mStream(stream),
-        mCalibrationTableName(std::move(calibrationTableName)),
-        mReadCache(readCache)
+        : mStream(stream)
+        , mCalibrationTableName(std::move(calibrationTableName))
+        , mReadCache(readCache)
     {
-    	nvinfer1::DimsNCHW dims = mStream.getDims();
-        mInputCount = samples_common::volume(dims);
+        nvinfer1::DimsNCHW dims = mStream.getDims();
+        mInputCount = samplesCommon::volume(dims);
         CHECK(cudaMalloc(&mDeviceInput, mInputCount * sizeof(float)));
         mStream.reset(firstBatch);
     }
