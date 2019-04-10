@@ -45,17 +45,28 @@ std::string locateFile(const std::string& input)
 }
 
 
+// Logger for TensorRT info/warning/errors
+class iLogger : public ILogger
+{
+    void log(Severity severity, const char* msg) override
+    {
+        // suppress info-level messages
+        std::cout << msg << std::endl;
+    }
+} gLoggerForBuild;
+
+
 ICudaEngine* loadModelAndCreateEngine(const char* uffFile, int maxBatchSize,
                                       IUffParser* parser, IHostMemory*& trtModelStream)
 {
     // Create the builder
-    IBuilder* builder = createInferBuilder(gLogger);
+    IBuilder* builder = createInferBuilder(gLoggerForBuild);
 
     // Parse the UFF model to populate the network, then set the outputs.
     INetworkDefinition* network = builder->createNetwork();
 
     std::cout << "Begin parsing model..." << std::endl;
-    if (!parser->parse(uffFile, *network, nvinfer1::DataType::kFLOAT))
+    if (!parser->parse(uffFile, *network, nvinfer1::DataType::kHALF))
         RETURN_AND_LOG(nullptr, ERROR, "Fail to parse");
 
     std::cout << "End parsing model..." << std::endl;
@@ -64,7 +75,7 @@ ICudaEngine* loadModelAndCreateEngine(const char* uffFile, int maxBatchSize,
     builder->setMaxBatchSize(maxBatchSize);
     // The _GB literal operator is defined in common/common.h
     builder->setMaxWorkspaceSize(1_GB); // We need about 1GB of scratch space for the plugin layer for batch size 5.
-    builder->setHalf2Mode(false);
+    builder->setHalf2Mode(true);
 
     std::cout << "Begin building engine..." << std::endl;
     ICudaEngine* engine = builder->buildCudaEngine(*network);
@@ -295,9 +306,13 @@ public:
     {
         std::cout << "enquque plugin " << this << std::endl;
         // perform nearest neighbor upsampling using cuda
+        auto t_start = std::chrono::high_resolution_clock::now();
         CHECK(cublasSetStream(mCublas, stream));
         CHECK(cudnnSetStream(mCudnn, stream));
         CHECK(cudaResizeNearestNeighbor((float*)inputs[0], mNbInputChannels, mInputWidth, mInputHeight, (float*)outputs[0], stream));
+        auto t_end = std::chrono::high_resolution_clock::now();
+        float dt = std::chrono::duration<float, std::milli>(t_end - t_start).count();
+        std::cout << "execution took " << dt << " ms" << std::endl;
         return 0;
     }
 
