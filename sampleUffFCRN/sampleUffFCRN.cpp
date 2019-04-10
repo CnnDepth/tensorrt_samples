@@ -190,13 +190,14 @@ void doInference(IExecutionContext& context, float* inputData, float* output, si
     CHECK(cudaMemcpyAsync(buffers[inputIndex], inputData, batchSize * INPUT_C * INPUT_H * INPUT_W * sizeof(float), cudaMemcpyHostToDevice, stream));
 
     context.execute(batchSize, &buffers[0]);
-    auto t_start = std::chrono::high_resolution_clock::now();
+    /*auto t_start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < 10; i++)
         context.execute(batchSize, &buffers[0]);
     auto t_end = std::chrono::high_resolution_clock::now();
-    float total = std::chrono::duration<float, std::milli>(t_end - t_start).count();
+    float total = std::chrono::duration<float, std::milli>(t_end - t_start).count();*/
+    context.execute(batchSize, &buffers[0]);
 
-    std::cout << "Average inference time over 10 runs: " << total / 10.0 << " ms." << std::endl;
+    //std::cout << "Average inference time over 10 runs: " << total / 10.0 << " ms." << std::endl;
 
     CHECK(cudaMemcpyAsync(output,
                           buffers[outputIndex],
@@ -276,7 +277,7 @@ public:
     void configureWithFormat(const Dims* inputDims, int nbInputs, const Dims* outputDims, int nbOutputs, DataType type, PluginFormat format, int maxBatchSize) override
     {
         std::cout << "configure " << this << " with format" << std::endl;
-        assert((type == DataType::kFLOAT || type == DataType::kHALF) && format == PluginFormat::kNCHW);
+        assert(supportsFormat(type, format));
         mDataType = type;
     }
 
@@ -309,7 +310,10 @@ public:
         auto t_start = std::chrono::high_resolution_clock::now();
         CHECK(cublasSetStream(mCublas, stream));
         CHECK(cudnnSetStream(mCudnn, stream));
-        CHECK(cudaResizeNearestNeighbor((float*)inputs[0], mNbInputChannels, mInputWidth, mInputHeight, (float*)outputs[0], stream));
+        if (mDataType == DataType::kFLOAT)
+            CHECK(cudaResizeNearestNeighbor<float>((float*)inputs[0], mNbInputChannels, mInputWidth, mInputHeight, (float*)outputs[0], stream));
+        else
+            CHECK(cudaResizeNearestNeighbor<__half>((__half*)inputs[0], mNbInputChannels, mInputWidth, mInputHeight, (__half*)outputs[0], stream));
         auto t_end = std::chrono::high_resolution_clock::now();
         float dt = std::chrono::duration<float, std::milli>(t_end - t_start).count();
         std::cout << "execution took " << dt << " ms" << std::endl;
@@ -382,38 +386,6 @@ private:
         CHECK(cudaMalloc(&deviceData, count));
         CHECK(cudaMemcpy(deviceData, data, count, cudaMemcpyHostToDevice));
         return deviceData;
-    }
-
-    void convertAndCopyToDevice(void*& deviceWeights, const Weights& weights)
-    {
-        if (weights.type != mDataType) // Weights are converted in host memory first, if the type does not match
-        {
-            size_t size = weights.count*(mDataType == DataType::kFLOAT ? sizeof(float) : sizeof(__half));
-            void* buffer = malloc(size);
-            for (int64_t v = 0; v < weights.count; ++v)
-                if (mDataType == DataType::kFLOAT)
-                    static_cast<float*>(buffer)[v] = fp16::__half2float(static_cast<const __half*>(weights.values)[v]);
-                else
-                    static_cast<__half*>(buffer)[v] = fp16::__float2half(static_cast<const float*>(weights.values)[v]);
-
-            deviceWeights = copyToDevice(buffer, size);
-            free(buffer);
-        }
-        else
-            deviceWeights = copyToDevice(weights.values, weights.count * type2size(mDataType));
-    }
-
-    void convertAndCopyToBuffer(char*& buffer, const Weights& weights)
-    {
-        if (weights.type != mDataType)
-            for (int64_t v = 0; v < weights.count; ++v)
-                if (mDataType == DataType::kFLOAT)
-                    reinterpret_cast<float*>(buffer)[v] = fp16::__half2float(static_cast<const __half*>(weights.values)[v]);
-                else
-                    reinterpret_cast<__half*>(buffer)[v] = fp16::__float2half(static_cast<const float*>(weights.values)[v]);
-        else
-            memcpy(buffer, weights.values, weights.count * type2size(mDataType));
-        buffer += weights.count * type2size(mDataType);
     }
 
     void deserializeToDevice(const char*& hostBuffer, void*& deviceWeights, size_t size)

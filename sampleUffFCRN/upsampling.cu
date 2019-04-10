@@ -26,6 +26,7 @@ __global__ void gpuResizeNearestNeighbor( T* input, int nChannels, int iHeight, 
 
 
 // nearest neighbor upsampling
+template <typename T>
 cudaError_t cudaResizeNearestNeighbor( float* input, size_t nChannels, size_t inputWidth, size_t inputHeight,
                         float* output, cudaStream_t stream )
 {
