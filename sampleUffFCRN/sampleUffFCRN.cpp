@@ -312,8 +312,8 @@ public:
         CHECK(cudnnSetStream(mCudnn, stream));
         if (mDataType == DataType::kFLOAT)
             CHECK(cudaResizeNearestNeighbor<float>((float*)inputs[0], mNbInputChannels, mInputWidth, mInputHeight, (float*)outputs[0], stream));
-        else
-            CHECK(cudaResizeNearestNeighbor<__half>((__half*)inputs[0], mNbInputChannels, mInputWidth, mInputHeight, (__half*)outputs[0], stream));
+        //else
+            //CHECK(cudaResizeNearestNeighbor<__half>((__half*)inputs[0], mNbInputChannels, mInputWidth, mInputHeight, (__half*)outputs[0], stream));
         auto t_end = std::chrono::high_resolution_clock::now();
         float dt = std::chrono::duration<float, std::milli>(t_end - t_start).count();
         std::cout << "execution took " << dt << " ms" << std::endl;

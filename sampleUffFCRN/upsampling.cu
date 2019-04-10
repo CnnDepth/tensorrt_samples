@@ -1,6 +1,7 @@
 #include "upsampling.h"
 #include <iostream>
 #include <cassert>
+#include "fp16.h"
 
 // gpu operation for nearest neighbor upsampling
 template <typename T>
@@ -27,8 +28,8 @@ __global__ void gpuResizeNearestNeighbor( T* input, int nChannels, int iHeight, 
 
 // nearest neighbor upsampling
 template <typename T>
-cudaError_t cudaResizeNearestNeighbor( float* input, size_t nChannels, size_t inputWidth, size_t inputHeight,
-                        float* output, cudaStream_t stream )
+cudaError_t cudaResizeNearestNeighbor( T* input, size_t nChannels, size_t inputWidth, size_t inputHeight,
+                        T* output, cudaStream_t stream )
 {
     std::cout << "cudaResizeNearestNeighbor" << std::endl;
     if( !input || !output )
@@ -49,7 +50,7 @@ cudaError_t cudaResizeNearestNeighbor( float* input, size_t nChannels, size_t in
     const size_t outputHeight = 2 * inputHeight;
     const dim3 gridDim(iDivUp(nChannels, blockDim.x), iDivUp(outputHeight, blockDim.y), iDivUp(outputWidth, blockDim.z));
 
-    gpuResizeNearestNeighbor<float><<<gridDim, blockDim, 0, stream>>>(input, nChannels, inputHeight, inputWidth, output);
+    gpuResizeNearestNeighbor<T><<<gridDim, blockDim, 0, stream>>>(input, nChannels, inputHeight, inputWidth, output);
 
     return CUDA(cudaGetLastError());
 }
@@ -66,3 +67,6 @@ cudaError_t cudaResizeBilinear( float* input, size_t inputWidth, size_t inputHei
     // TODO
     return CUDA(cudaGetLastError());
 }
+
+template cudaError_t cudaResizeNearestNeighbor<float>;
+template cudaError_t cudaResizeNearestNeighbor<__half>;
