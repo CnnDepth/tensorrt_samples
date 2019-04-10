@@ -13,9 +13,9 @@
 #include "NvInferPlugin.h"
 #include "NvUffParser.h"
 #include "common.h"
-#include "fp16.h"
 #include "upsampling.h"
 #include "argsParser.h"
+#include "fp16.h"
 
 using namespace nvinfer1;
 using namespace nvuffparser;
@@ -51,7 +51,8 @@ class iLogger : public ILogger
     void log(Severity severity, const char* msg) override
     {
         // suppress info-level messages
-        std::cout << msg << std::endl;
+        if (severity != Severity::kINFO)
+            std::cout << msg << std::endl;
     }
 } gLoggerForBuild;
 
@@ -156,7 +157,8 @@ calculateBindingBufferSizes(const ICudaEngine& engine, int nbBindings, int batch
     return sizes;
 }
 
-void doInference(IExecutionContext& context, float* inputData, float* output, size_t batchSize)
+template <typename T>
+void doInference(IExecutionContext& context, T* inputData, T* output, size_t batchSize)
 {
     const ICudaEngine& engine = context.getEngine();
     // Input and output buffer pointers that we pass to the engine - the engine requires exactly IEngine::getNbBindings(),
@@ -187,7 +189,7 @@ void doInference(IExecutionContext& context, float* inputData, float* output, si
     CHECK(cudaStreamCreate(&stream));
 
     // DMA the input to the GPU,  execute the batch asynchronously, and DMA it back:
-    CHECK(cudaMemcpyAsync(buffers[inputIndex], inputData, batchSize * INPUT_C * INPUT_H * INPUT_W * sizeof(float), cudaMemcpyHostToDevice, stream));
+    CHECK(cudaMemcpyAsync(buffers[inputIndex], inputData, batchSize * INPUT_C * INPUT_H * INPUT_W * sizeof(T), cudaMemcpyHostToDevice, stream));
 
     context.execute(batchSize, &buffers[0]);
     /*auto t_start = std::chrono::high_resolution_clock::now();
@@ -201,7 +203,7 @@ void doInference(IExecutionContext& context, float* inputData, float* output, si
 
     CHECK(cudaMemcpyAsync(output,
                           buffers[outputIndex],
-                          batchSize * OUTPUT_C * OUTPUT_H * OUTPUT_W * sizeof(float),
+                          batchSize * OUTPUT_C * OUTPUT_H * OUTPUT_W * sizeof(T),
                           cudaMemcpyDeviceToHost, 
                           stream)
     );
@@ -312,8 +314,8 @@ public:
         CHECK(cudnnSetStream(mCudnn, stream));
         if (mDataType == DataType::kFLOAT)
             CHECK(cudaResizeNearestNeighbor<float>((float*)inputs[0], mNbInputChannels, mInputWidth, mInputHeight, (float*)outputs[0], stream));
-        //else
-            //CHECK(cudaResizeNearestNeighbor<__half>((__half*)inputs[0], mNbInputChannels, mInputWidth, mInputHeight, (__half*)outputs[0], stream));
+        else
+            CHECK(cudaResizeNearestNeighbor<__half>((__half*)inputs[0], mNbInputChannels, mInputWidth, mInputHeight, (__half*)outputs[0], stream));
         auto t_end = std::chrono::high_resolution_clock::now();
         float dt = std::chrono::duration<float, std::milli>(t_end - t_start).count();
         std::cout << "execution took " << dt << " ms" << std::endl;
@@ -481,10 +483,88 @@ PluginFieldCollection NearestNeighborUpsamplingPluginCreator::mFC{};
 std::vector<PluginField> NearestNeighborUpsamplingPluginCreator::mPluginAttributes;
 REGISTER_TENSORRT_PLUGIN(NearestNeighborUpsamplingPluginCreator);
 
+void processImage(const char* imageFile, const char* outputImageFile, IExecutionContext* context, bool fp16)
+{
+    // Read sample image
+    samplesCommon::PPM<INPUT_C, INPUT_H, INPUT_W> image;
+    readPPMFile(imageFile, image);
+    std::cout << "PPM image readed" << std::endl;
+
+    vector<float> data(INPUT_C * INPUT_H * INPUT_W);
+    for (int c = 0; c < INPUT_C; ++c)
+    {
+        for (unsigned j = 0, volChl = INPUT_H * INPUT_W; j < volChl; ++j)
+        {
+            data[c * volChl + j] = float(image.buffer[j * INPUT_C + c]) / 255.0;
+        }
+    }
+    std::cout << "Data created" << std::endl;
+    std::cout << "Data size: " << data.size() << std::endl;
+    std::cout << "First data pixel: " << data[0] << std::endl;
+
+    if (fp16)
+    {
+        // Copy image pixels to buffer
+        std::vector<__half> data(INPUT_C * INPUT_H * INPUT_W);
+        for (int c = 0; c < INPUT_C; ++c)
+        {
+            for (unsigned j = 0, volChl = INPUT_H * INPUT_W; j < volChl; ++j)
+            {
+                data[c * volChl + j] = fp16::__float2half(float(image.buffer[j * INPUT_C + c]) / 255.0);
+            }
+        }
+
+        // Execute engine
+        std::vector<__half> output(OUTPUT_C * OUTPUT_W * OUTPUT_H);
+        doInference<__half>(*context, &data[0], &output[0], 1);
+
+        // Write result on disk
+        int OUTPUT_SIZE = OUTPUT_C * OUTPUT_H * OUTPUT_W;
+        uint8_t* outputPixels = new uint8_t[OUTPUT_SIZE];
+        for (int i = 0; i < OUTPUT_SIZE; i++)
+            outputPixels[i] = uint8_t(fp16::__half2float(output[i]) * 255.0);
+        std::ofstream outfile(outputImageFile, std::ofstream::binary);
+        outfile << "P6"
+                << "\n"
+                << OUTPUT_W << " " << OUTPUT_H << "\n"
+                << 255 << "\n";
+        outfile.write(reinterpret_cast<char*>(outputPixels), OUTPUT_SIZE);
+        delete outputPixels;
+    }
+    else
+    {
+        // Copy image pixels to buffer
+        std::vector<float> data(INPUT_C * INPUT_H * INPUT_W);
+        for (int c = 0; c < INPUT_C; ++c)
+        {
+            for (unsigned j = 0, volChl = INPUT_H * INPUT_W; j < volChl; ++j)
+            {
+                data[c * volChl + j] = float(image.buffer[j * INPUT_C + c]) / 255.0;
+            }
+        }
+
+        // Execute engine
+        std::vector<float> output(OUTPUT_C * OUTPUT_W * OUTPUT_H);
+        doInference<float>(*context, &data[0], &output[0], 1);
+
+        // Write result on disk
+        int OUTPUT_SIZE = OUTPUT_C * OUTPUT_H * OUTPUT_W;
+        uint8_t* outputPixels = new uint8_t[OUTPUT_SIZE];
+        for (int i = 0; i < OUTPUT_SIZE; i++)
+            outputPixels[i] = uint8_t(output[i] * 255.0);
+        std::ofstream outfile(outputImageFile, std::ofstream::binary);
+        outfile << "P6"
+                << "\n"
+                << OUTPUT_W << " " << OUTPUT_H << "\n"
+                << 255 << "\n";
+        outfile.write(reinterpret_cast<char*>(outputPixels), OUTPUT_SIZE);
+        delete outputPixels;
+    }
+}
+
 int main(int argc, char* argv[])
 {
     samplesCommon::parseArgs(args, argc, argv);
-    const int N = 1;
     auto fileName = locateFile("test_upsampling.uff");
 
     auto parser = createUffParser();
@@ -494,7 +574,7 @@ int main(int argc, char* argv[])
     BatchStream calibrationStream(CAL_BATCH_SIZE, NB_CAL_BATCHES);
     IHostMemory* trtModelStream{nullptr};
 
-    ICudaEngine* tmpEngine = loadModelAndCreateEngine(fileName.c_str(), N, parser, trtModelStream);
+    ICudaEngine* tmpEngine = loadModelAndCreateEngine(fileName.c_str(), 1, parser, trtModelStream);
     assert(tmpEngine != nullptr);
     assert(trtModelStream != nullptr);
     tmpEngine->destroy();
@@ -520,40 +600,8 @@ int main(int argc, char* argv[])
     trtModelStream->destroy();
     IExecutionContext* context = engine->createExecutionContext();
     assert(context != nullptr);
+    std::cout << "fp16: " << args.fp16 << std::endl;
 
-    // Read sample image
-    samplesCommon::PPM<INPUT_C, INPUT_H, INPUT_W> image;
-    readPPMFile("bus.ppm", image);
-    std::cout << "PPM image readed" << std::endl;
-    vector<float> data(N * INPUT_C * INPUT_H * INPUT_W);
-    for (int c = 0; c < INPUT_C; ++c)
-    {
-        for (unsigned j = 0, volChl = INPUT_H * INPUT_W; j < volChl; ++j)
-        {
-            data[c * volChl + j] = float(image.buffer[j * INPUT_C + c]) / 255.0;
-        }
-    }
-    std::cout << "Data created" << std::endl;
-    std::cout << "Data size: " << data.size() << std::endl;
-    std::cout << "First data pixel: " << data[0] << std::endl;
-
-    // Execute engine
-    std::vector<float> output(N * OUTPUT_C * OUTPUT_W * OUTPUT_H);
-    std::cout << "first output pixel: " << output[0] << std::endl;
-    doInference(*context, &data[0], &output[0], 1);
-    std::cout << "first output pixel: " << output[0] << std::endl;
-
-    // Write result on disk
-    int OUTPUT_SIZE = N * OUTPUT_C * OUTPUT_H * OUTPUT_W;
-    uint8_t* outputPixels = new uint8_t[OUTPUT_SIZE];
-    for (int i = 0; i < OUTPUT_SIZE; i++)
-        outputPixels[i] = uint8_t(output[i] * 255.0);
-    std::ofstream outfile("bus_upsampled.ppm", std::ofstream::binary);
-    outfile << "P6"
-            << "\n"
-            << OUTPUT_W << " " << OUTPUT_H << "\n"
-            << 255 << "\n";
-    outfile.write(reinterpret_cast<char*>(outputPixels), OUTPUT_SIZE);
-    delete outputPixels;
+    processImage("bus.ppm", "bus_upsampled.ppm", context, args.fp16);
     return EXIT_SUCCESS;
 }

@@ -1,6 +1,7 @@
 #ifndef __UPSAMPLING_H__
 #define __UPSAMPLING_H__
 
+#include <cublas_v2.h>
 #include "cudaUtility.h"
 
 /**

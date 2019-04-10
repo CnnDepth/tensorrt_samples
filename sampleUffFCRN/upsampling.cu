@@ -1,7 +1,6 @@
 #include "upsampling.h"
 #include <iostream>
 #include <cassert>
-#include "fp16.h"
 
 // gpu operation for nearest neighbor upsampling
 template <typename T>
@@ -68,5 +67,5 @@ cudaError_t cudaResizeBilinear( float* input, size_t inputWidth, size_t inputHei
     return CUDA(cudaGetLastError());
 }
 
-template cudaError_t cudaResizeNearestNeighbor<float>;
-template cudaError_t cudaResizeNearestNeighbor<__half>;
+template cudaError_t cudaResizeNearestNeighbor<float>(float*, size_t, size_t, size_t, float*, cudaStream_t);
+template cudaError_t cudaResizeNearestNeighbor<__half>(__half*, size_t, size_t, size_t, __half*, cudaStream_t);
