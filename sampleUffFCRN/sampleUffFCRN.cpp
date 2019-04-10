@@ -51,14 +51,14 @@ class iLogger : public ILogger
     void log(Severity severity, const char* msg) override
     {
         // suppress info-level messages
-        if (severity != Severity::kINFO)
-            std::cout << msg << std::endl;
+        //if (severity != Severity::kINFO)
+        std::cout << msg << std::endl;
     }
 } gLoggerForBuild;
 
 
 ICudaEngine* loadModelAndCreateEngine(const char* uffFile, int maxBatchSize,
-                                      IUffParser* parser, IHostMemory*& trtModelStream)
+                                      IUffParser* parser, IHostMemory*& trtModelStream, bool fp16)
 {
     // Create the builder
     IBuilder* builder = createInferBuilder(gLoggerForBuild);
@@ -66,8 +66,13 @@ ICudaEngine* loadModelAndCreateEngine(const char* uffFile, int maxBatchSize,
     // Parse the UFF model to populate the network, then set the outputs.
     INetworkDefinition* network = builder->createNetwork();
 
+    DataType dtype;
     std::cout << "Begin parsing model..." << std::endl;
-    if (!parser->parse(uffFile, *network, nvinfer1::DataType::kHALF))
+    if (fp16)
+        dtype = nvinfer1::DataType::kHALF;
+    else
+        dtype = nvinfer1::DataType::kFLOAT;
+    if (!parser->parse(uffFile, *network, dtype))
         RETURN_AND_LOG(nullptr, ERROR, "Fail to parse");
 
     std::cout << "End parsing model..." << std::endl;
@@ -76,7 +81,7 @@ ICudaEngine* loadModelAndCreateEngine(const char* uffFile, int maxBatchSize,
     builder->setMaxBatchSize(maxBatchSize);
     // The _GB literal operator is defined in common/common.h
     builder->setMaxWorkspaceSize(1_GB); // We need about 1GB of scratch space for the plugin layer for batch size 5.
-    builder->setHalf2Mode(true);
+    builder->setHalf2Mode(fp16);
 
     std::cout << "Begin building engine..." << std::endl;
     ICudaEngine* engine = builder->buildCudaEngine(*network);
@@ -192,14 +197,14 @@ void doInference(IExecutionContext& context, T* inputData, T* output, size_t bat
     CHECK(cudaMemcpyAsync(buffers[inputIndex], inputData, batchSize * INPUT_C * INPUT_H * INPUT_W * sizeof(T), cudaMemcpyHostToDevice, stream));
 
     context.execute(batchSize, &buffers[0]);
-    /*auto t_start = std::chrono::high_resolution_clock::now();
+    auto t_start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < 10; i++)
         context.execute(batchSize, &buffers[0]);
     auto t_end = std::chrono::high_resolution_clock::now();
-    float total = std::chrono::duration<float, std::milli>(t_end - t_start).count();*/
-    context.execute(batchSize, &buffers[0]);
+    float total = std::chrono::duration<float, std::milli>(t_end - t_start).count();
+    //context.execute(batchSize, &buffers[0]);
 
-    //std::cout << "Average inference time over 10 runs: " << total / 10.0 << " ms." << std::endl;
+    std::cout << "Average inference time over 10 runs: " << total / 10.0 << " ms." << std::endl;
 
     CHECK(cudaMemcpyAsync(output,
                           buffers[outputIndex],
@@ -207,12 +212,15 @@ void doInference(IExecutionContext& context, T* inputData, T* output, size_t bat
                           cudaMemcpyDeviceToHost, 
                           stream)
     );
+    std::cout << "copying done" << std::endl;
     cudaStreamSynchronize(stream);
 
     // Release the stream and the buffers
     cudaStreamDestroy(stream);
     CHECK(cudaFree(buffers[inputIndex]));
+    std::cout << "Freeing input done" << std::endl;
     CHECK(cudaFree(buffers[outputIndex]));
+    std::cout << "Freeing output done" << std::endl;
 }
 
 
@@ -574,7 +582,7 @@ int main(int argc, char* argv[])
     BatchStream calibrationStream(CAL_BATCH_SIZE, NB_CAL_BATCHES);
     IHostMemory* trtModelStream{nullptr};
 
-    ICudaEngine* tmpEngine = loadModelAndCreateEngine(fileName.c_str(), 1, parser, trtModelStream);
+    ICudaEngine* tmpEngine = loadModelAndCreateEngine(fileName.c_str(), 1, parser, trtModelStream, args.fp16);
     assert(tmpEngine != nullptr);
     assert(trtModelStream != nullptr);
     tmpEngine->destroy();
@@ -602,6 +610,6 @@ int main(int argc, char* argv[])
     assert(context != nullptr);
     std::cout << "fp16: " << args.fp16 << std::endl;
 
-    processImage("bus.ppm", "bus_upsampled.ppm", context, args.fp16);
+    processImage("bus.ppm", "bus_depth.ppm", context, args.fp16);
     return EXIT_SUCCESS;
 }
