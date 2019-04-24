@@ -28,17 +28,21 @@ static samplesCommon::Args args;
 static constexpr int CAL_BATCH_SIZE = 1;
 static constexpr int FIRST_CAL_BATCH = 0, NB_CAL_BATCHES = 10;
 
-static constexpr int INPUT_C = 3;
-static constexpr int INPUT_H = 480;
-static constexpr int INPUT_W = 640;
+int INPUT_C = 3;
+int INPUT_H = 480;
+int INPUT_W = 640;
+static constexpr int PPM_INPUT_C = 3;
+static constexpr int PPM_INPUT_H = 480;
+static constexpr int PPM_INPUT_W = 640;
 
-static constexpr int OUTPUT_C = 1;
-static constexpr int OUTPUT_H = 480;
-static constexpr int OUTPUT_W = 640;
+int OUTPUT_C = 1;
+int OUTPUT_H = 480;
+int OUTPUT_W = 640;
 
-const char* INPUT_BLOB_NAME = "tf/Placeholder";
-const char* OUTPUT_BLOB_NAME = "tf/Reshape";
-const char* MODEL_NAME = "sampleUffFCRNEngine.trt";
+const char* INPUT_BLOB_NAME = "";
+const char* OUTPUT_BLOB_NAME = "";
+const char* MODEL_NAME = "";
+const char* UFF_FILENAME = "";
 
 #define RETURN_AND_LOG(ret, severity, message)                                 \
     do                                                                         \
@@ -194,118 +198,86 @@ PluginFieldCollection NearestNeighborUpsamplingPluginCreator::mFC{};
 std::vector<PluginField> NearestNeighborUpsamplingPluginCreator::mPluginAttributes;
 REGISTER_TENSORRT_PLUGIN(NearestNeighborUpsamplingPluginCreator);
 
-void processImage(const char* imageFile, const char* outputImageFile, IExecutionContext* context, bool fp16)
+void processImage(const char* imageFile, const char* outputImageFile, IExecutionContext* context)
 {
     // Read sample image
-    samplesCommon::PPM<INPUT_C, INPUT_H, INPUT_W> image;
+    samplesCommon::PPM<PPM_INPUT_C, PPM_INPUT_H, PPM_INPUT_W> image;
     readPPMFile(imageFile, image);
     std::cout << "PPM image readed" << std::endl;
 
-    /*if (fp16)
+    // Copy image pixels to buffer
+    std::vector<float> data(INPUT_C * INPUT_H * INPUT_W);
+    for (int c = 0; c < INPUT_C; ++c)
     {
-        // Copy image pixels to buffer
-        std::vector<__half> data(INPUT_C * INPUT_H * INPUT_W);
-        for (int c = 0; c < INPUT_C; ++c)
+        for (unsigned j = 0, volChl = INPUT_H * INPUT_W; j < volChl; ++j)
         {
-            for (unsigned j = 0, volChl = INPUT_H * INPUT_W; j < volChl; ++j)
-            { 
-                float pixel_value = float(image.buffer[j * INPUT_C + c]) / 255.0;
-                pixel_value = pixel_value * 275.0 - 123.0;
-                data[c * volChl + j] = fp16::__float2half(pixel_value);
-            }
+            float pixel_value = float(image.buffer[j * INPUT_C + c]) / 255.0;
+            pixel_value = pixel_value * 275.0 - 123.0;
+            data[c * volChl + j] = pixel_value;
         }
-        std::cout << "Data created" << std::endl;
-        std::cout << "Data size: " << data.size() << std::endl;
-        std::cout << "First data pixel: " << fp16::__half2float(data[0]) << std::endl;
-
-        // Execute engine
-        std::vector<__half> output(OUTPUT_C * OUTPUT_W * OUTPUT_H);
-        doInference<__half>(*context, &data[0], &output[0], 1);
-        std::cout << "First output pixel: " << fp16::__half2float(output[0]) << std::endl;
-
-        // Write result on disk
-        int OUTPUT_SIZE = OUTPUT_C * OUTPUT_H * OUTPUT_W;
-        uint8_t* outputPixels = new uint8_t[OUTPUT_SIZE * 3];
-        for (int c = 0; c < 3; c++)
-            for (int h = 0; h < OUTPUT_H; h++)
-                for (int w = 0; w < OUTPUT_W; w++)
-                {
-                    int posCHW = 0 * OUTPUT_H * OUTPUT_W + h * OUTPUT_W + w;
-                    int posHWC = h * OUTPUT_W * 3 + w * 3 + c;
-                    outputPixels[posHWC] = uint8_t(fp16::__half2float(output[posCHW]) * 25.5);
-                }
-        std::ofstream outfile(outputImageFile, std::ofstream::binary);
-        outfile << "P6"
-                << "\n"
-                << OUTPUT_W << " " << OUTPUT_H << "\n"
-                << 255 << "\n";
-        outfile.write(reinterpret_cast<char*>(outputPixels), OUTPUT_SIZE * 3);
-        delete outputPixels;
     }
-    else
-    {*/
-        // Copy image pixels to buffer
-        std::vector<float> data(INPUT_C * INPUT_H * INPUT_W);
-        for (int c = 0; c < INPUT_C; ++c)
-        {
-            for (unsigned j = 0, volChl = INPUT_H * INPUT_W; j < volChl; ++j)
+    std::cout << "Data created" << std::endl;
+    std::cout << "Data size: " << data.size() << std::endl;
+    std::cout << "First data pixel: " << data[0] << std::endl;
+
+    // Execute engine
+    int OUTPUT_SIZE = OUTPUT_C * OUTPUT_H * OUTPUT_W;
+    std::vector<float> output(OUTPUT_SIZE);
+    doInference<float>(*context, &data[0], &output[0], 1);
+    std::cout << "First output pixel: " << output[0] << std::endl;
+    float sum_depth = 0;
+    float min_depth = 10;
+    float max_depth = 0;
+    int zero_pixels = 0;
+    for (int i = 0; i < OUTPUT_SIZE; i++)
+    {
+        if (output[i] < min_depth)
+            min_depth = output[i];
+        if (output[i] > max_depth)
+            max_depth = output[i];
+        sum_depth += output[i];
+        if (output[i] < 1e-5)
+            zero_pixels++;
+    }
+    std::cout << "Min depth: " << min_depth << "; max depth: " << max_depth << std::endl;
+    std::cout << "Mean depth: " << sum_depth / OUTPUT_SIZE << std::endl;
+    std::cout << "part of zero pixels: " << (float)zero_pixels / (float)OUTPUT_SIZE << std::endl;
+
+    // Write result on disk
+    uint8_t* outputPixels = new uint8_t[OUTPUT_SIZE * 3];
+    for (int c = 0; c < 3; c++)
+        for (int h = 0; h < OUTPUT_H; h++)
+            for (int w = 0; w < OUTPUT_W; w++)
             {
-                float pixel_value = float(image.buffer[j * INPUT_C + c]) / 255.0;
-                pixel_value = pixel_value * 275.0 - 123.0;
-                data[c * volChl + j] = pixel_value;
+                int posCHW = 0 * OUTPUT_H * OUTPUT_W + h * OUTPUT_W + w;
+                int posHWC = h * OUTPUT_W * 3 + w * 3 + c;
+                outputPixels[posHWC] = uint8_t(output[posCHW] * 25.5);
             }
-        }
-        std::cout << "Data created" << std::endl;
-        std::cout << "Data size: " << data.size() << std::endl;
-        std::cout << "First data pixel: " << data[0] << std::endl;
-
-        // Execute engine
-        int OUTPUT_SIZE = OUTPUT_C * OUTPUT_H * OUTPUT_W;
-        std::vector<float> output(OUTPUT_SIZE);
-        doInference<float>(*context, &data[0], &output[0], 1);
-        std::cout << "First output pixel: " << output[0] << std::endl;
-        float sum_depth = 0;
-        float min_depth = 10;
-        float max_depth = 0;
-        int zero_pixels = 0;
-        for (int i = 0; i < OUTPUT_SIZE; i++)
-        {
-            if (output[i] < min_depth)
-                min_depth = output[i];
-            if (output[i] > max_depth)
-                max_depth = output[i];
-            sum_depth += output[i];
-            if (output[i] < 1e-5)
-                zero_pixels++;
-        }
-        std::cout << "Min depth: " << min_depth << "; max depth: " << max_depth << std::endl;
-        std::cout << "Mean depth: " << sum_depth / OUTPUT_SIZE << std::endl;
-        std::cout << "part of zero pixels: " << (float)zero_pixels / (float)OUTPUT_SIZE << std::endl;
-
-        // Write result on disk
-        uint8_t* outputPixels = new uint8_t[OUTPUT_SIZE * 3];
-        for (int c = 0; c < 3; c++)
-            for (int h = 0; h < OUTPUT_H; h++)
-                for (int w = 0; w < OUTPUT_W; w++)
-                {
-                    int posCHW = 0 * OUTPUT_H * OUTPUT_W + h * OUTPUT_W + w;
-                    int posHWC = h * OUTPUT_W * 3 + w * 3 + c;
-                    outputPixels[posHWC] = uint8_t(output[posCHW] * 25.5);
-                }
-        std::ofstream outfile(outputImageFile, std::ofstream::binary);
-        outfile << "P6"
-                << "\n"
-                << OUTPUT_W << " " << OUTPUT_H << "\n"
-                << 255 << "\n";
-        outfile.write(reinterpret_cast<char*>(outputPixels), OUTPUT_SIZE * 3);
-        delete outputPixels;
-    //}
+    std::ofstream outfile(outputImageFile, std::ofstream::binary);
+    outfile << "P6"
+            << "\n"
+            << OUTPUT_W << " " << OUTPUT_H << "\n"
+            << 255 << "\n";
+    outfile.write(reinterpret_cast<char*>(outputPixels), OUTPUT_SIZE * 3);
+    delete outputPixels;
 }
 
 int main(int argc, char* argv[])
 {
     samplesCommon::parseArgs(args, argc, argv);
-    auto fileName = locateFile("test_upsampling.uff");
+    INPUT_C = 3;
+    INPUT_H = args.height;
+    INPUT_W = args.width;
+    OUTPUT_C = 1;
+    OUTPUT_H = args.height;
+    OUTPUT_W = args.width;
+    std::cout << "input h and w: " << INPUT_H << ' ' << INPUT_W << std::endl;
+    std::cout << "output h and w: " << OUTPUT_H << ' ' << OUTPUT_W << std::endl;
+    INPUT_BLOB_NAME = args.uffInputBlob.c_str();
+    OUTPUT_BLOB_NAME = args.outputBlob.c_str();
+    MODEL_NAME = args.engineFile.c_str();
+    UFF_FILENAME = args.uffModel.c_str();
+
 
     auto parser = createUffParser();
     parser->registerInput(INPUT_BLOB_NAME, DimsCHW(INPUT_C, INPUT_H, INPUT_W), UffInputOrder::kNCHW);
@@ -313,19 +285,22 @@ int main(int argc, char* argv[])
 
     IHostMemory* trtModelStream{nullptr};
 
-    ICudaEngine* tmpEngine = loadModelAndCreateEngine(fileName.c_str(), 1, parser, trtModelStream, args.fp16);
+    ICudaEngine* tmpEngine = loadModelAndCreateEngine(UFF_FILENAME, 1, parser, trtModelStream, args.fp16);
     assert(tmpEngine != nullptr);
     assert(trtModelStream != nullptr);
     tmpEngine->destroy();
 
     // save the engine
-    std::ofstream p("sampleUffFCRNEngine.trt");
-    if (!p)
+    if (strlen(MODEL_NAME) > 0)
     {
-        std::cerr << "could not open plan output file" << std::endl;
-        return 1;
+        std::ofstream p(MODEL_NAME);
+        if (!p)
+        {
+            std::cerr << "could not open plan output file" << std::endl;
+            return 1;
+        }
+        p.write(reinterpret_cast<const char*>(trtModelStream->data()), trtModelStream->size());
     }
-    p.write(reinterpret_cast<const char*>(trtModelStream->data()), trtModelStream->size());
 
     // Deserialize the engine.
     std::cout << "*** deserializing" << std::endl;
@@ -355,7 +330,7 @@ int main(int argc, char* argv[])
     return 0;
     }*/
 
-    processImage("bus_preprocessed.ppm", "bus_depth.ppm", context, args.fp16);
+    processImage("bus_preprocessed.ppm", "bus_depth.ppm", context);
     std::cout << "Image processed" << std::endl;
     return EXIT_SUCCESS;
 }
