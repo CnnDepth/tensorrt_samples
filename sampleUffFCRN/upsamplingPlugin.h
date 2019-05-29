@@ -1,5 +1,5 @@
-#ifndef __PLUGIN_H__
-#define __PLUGIN_H__
+#ifndef __UPSAMPLING_PLUGIN_H__
+#define __UPSAMPLING_PLUGIN_H__
 
 #include <cublas_v2.h>
 #include <cudnn.h>
@@ -12,71 +12,52 @@ class NearestNeighborUpsamplingPlugin : public IPluginV2
 public:
     NearestNeighborUpsamplingPlugin(int nbInputChannels, int inputHeight, int inputWidth)
     {
-        std::cout << "Init " << this << " from dims" << std::endl;  
         mNbInputChannels = nbInputChannels;
         mInputWidth = inputWidth;
         mInputHeight = inputHeight;
-        std::cout << "set input width: " << mInputWidth << std::endl;
     }
 
-    NearestNeighborUpsamplingPlugin(const Weights *weights, size_t nbWeights)
-    {
-        std::cout << "Init " << this << " from weights" << std::endl;
-        std::cout << "I have " << nbWeights << " weights" << endl;
-        std::cout << "weights ptr is " << weights << std::endl;
-    }
+    NearestNeighborUpsamplingPlugin(const Weights *weights, size_t nbWeights) { }
 
     NearestNeighborUpsamplingPlugin(const void* data, size_t length)
     {
-        std::cout << "Init " << this << " from data and length" << std::endl;
         const char* d = static_cast<const char*>(data), *a = d;
         read(d, mNbInputChannels);
         read(d, mInputWidth);
         read(d, mInputHeight);
         read(d, mDataType);
-        std::cout << "Readed input width " << mInputWidth << std::endl;
         assert(d == a + length);
     }
 
-    ~NearestNeighborUpsamplingPlugin()
-    {
-        std::cout << "delete plugin " << this << std::endl;
-    }
+    ~NearestNeighborUpsamplingPlugin() { }
 
     int getNbOutputs() const override
     {
-        std::cout << "get number of outputs of " << this << std::endl;
         return 1;
     }
 
     Dims getOutputDimensions(int index, const Dims* inputs, int nbInputDims) override
     {
-        std::cout << "Get output dimensions of " << this << std::endl;
-        std::cout << "input dims are: " << inputs[0].d[0] << ' ' << inputs[0].d[1] << ' ' << inputs[0].d[2] << std::endl;
         assert(index == 0 && nbInputDims == 1 && inputs[0].nbDims == 3);
         mNbInputChannels = inputs[0].d[0];
         mInputHeight = inputs[0].d[1];
         mInputWidth = inputs[0].d[2];
-        std::cout << "set input width " << mInputWidth << std::endl;
-        return Dims3(inputs[0].d[0], 2 * inputs[0].d[1], 2 * inputs[0].d[2]);
+        return nvinfer1::Dims3(inputs[0].d[0], 2 * inputs[0].d[1], 2 * inputs[0].d[2]);
     }
 
     bool supportsFormat(DataType type, PluginFormat format) const override 
     { 
-        std::cout << "supports format? " << this << std::endl;
         return (type == DataType::kFLOAT || type == DataType::kHALF) && format == PluginFormat::kNCHW; 
     }
 
     void configureWithFormat(const Dims* inputDims, int nbInputs, const Dims* outputDims, int nbOutputs, DataType type, PluginFormat format, int maxBatchSize) override
     {
-        std::cout << "configure " << this << " with format" << std::endl;
         assert(supportsFormat(type, format));
         mDataType = type;
     }
 
     int initialize() override
     {
-        std::cout << "Initialize plugin " << this << std::endl;
         CHECK(cudnnCreate(&mCudnn));// initialize cudnn and cublas
         CHECK(cublasCreate(&mCublas));
         return 0;
@@ -84,7 +65,6 @@ public:
 
     virtual void terminate() override
     {
-        std::cout << "terminate plugin " << this << std::endl;
         CHECK(cublasDestroy(mCublas));
         CHECK(cudnnDestroy(mCudnn));
         // write below code for custom variables
@@ -121,13 +101,11 @@ public:
 
     const char* getPluginType() const override 
     { 
-        std::cout << "get type of " << this << std::endl;
         return "ResizeNearestNeighbor";
     }
 
     const char* getPluginVersion() const override 
     { 
-        std::cout << "get version of " << this << std::endl;
         return "1";
     }
 
@@ -185,7 +163,6 @@ class NearestNeighborUpsamplingPluginCreator: public IPluginCreator
 public:
     NearestNeighborUpsamplingPluginCreator()
     {
-        std::cout << "Create plugin creator" << std::endl;
         mPluginAttributes.emplace_back(PluginField("nbInputChannels", nullptr, PluginFieldType::kINT32, 1));
         mPluginAttributes.emplace_back(PluginField("inputHeight", nullptr, PluginFieldType::kINT32, 1));
         mPluginAttributes.emplace_back(PluginField("inputWidth", nullptr, PluginFieldType::kINT32, 1));
@@ -198,23 +175,20 @@ public:
 
     const char* getPluginName() const override 
     {
-        std::cout << "get plugin name" << std::endl;
         return "ResizeNearestNeighbor"; 
     }
 
     const char* getPluginVersion() const override
     {
-        std::cout << "get plugin version" << std::endl;
         return "1";
     }
 
     const PluginFieldCollection* getFieldNames() override { return &mFC; }
 
-    IPluginV2* createPlugin(const char* name, const PluginFieldCollection* fc) override;
+    virtual IPluginV2* createPlugin(const char* name, const PluginFieldCollection* fc) override;
 
     IPluginV2* deserializePlugin(const char* name, const void* serialData, size_t serialLength) override
     {
-        std::cout << "deserialize plugin using the creator" << std::endl;
         //This object will be deleted when the network is destroyed, which will
         //call Concat::destroy()
         return new NearestNeighborUpsamplingPlugin(serialData, serialLength);

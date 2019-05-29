@@ -9,7 +9,7 @@
  * @ingroup util
  */
 template<typename T>
-cudaError_t cudaResizeNearestNeighbor( T* input, size_t nChannels, size_t inputWidth, size_t inputHeight,
+cudaError_t cudaResizeNearestNeighbor( T* input, int nChannels, int inputHeight, int inputWidth,
                         T* output, cudaStream_t stream );
 
 /**
@@ -17,7 +17,7 @@ cudaError_t cudaResizeNearestNeighbor( T* input, size_t nChannels, size_t inputW
  * @ingroup util
  */
 template<typename T>
-cudaError_t cudaResizeBilinear( T* input, size_t nChannels, size_t inputWidth, size_t inputHeight,
+cudaError_t cudaResizeBilinear( T* input, int nChannels, int inputHeight, int inputWidth,
                         T* output, cudaStream_t stream );
 
 #endif

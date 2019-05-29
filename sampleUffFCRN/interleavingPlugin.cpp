@@ -1,4 +1,4 @@
-#include "plugin.h"
+#include "interleavingPlugin.h"
 #include <cublas_v2.h>
 #include <cudnn.h>
 #include "NvInferPlugin.h"
@@ -7,9 +7,7 @@
 
 int InterleavingPlugin::enqueue(int batchSize, const void*const * inputs, void** outputs, void* workspace, cudaStream_t stream)
 {
-    std::cout << "enquque plugin " << this << std::endl;
-    // perform nearest neighbor upsampling using cuda
-    std::cout << "Input size: " << mNbInputChannels << ' ' << mInputHeight << ' ' << mInputWidth << std::endl;
+    // perform interleaving operation using cuda
     CHECK(cublasSetStream(mCublas, stream));
     CHECK(cudnnSetStream(mCudnn, stream));
     if (mDataType == DataType::kFLOAT)
@@ -37,25 +35,20 @@ int InterleavingPlugin::enqueue(int batchSize, const void*const * inputs, void**
 
 IPluginV2* InterleavingPluginCreator::createPlugin(const char* name, const PluginFieldCollection* fc)
     {
-        std::cout << "create plugin using the creator" << std::endl;
-        std::cout << "name is " << name << std::endl;
         const PluginField* fields = fc->fields;
         for (int i = 0; i < fc->nbFields; ++i)
         {
             const char* attrName = fields[i].name;
             if (!strcmp(attrName, "nbInputChannels"))
             {
-                //assert(fields[i].type == PluginFieldType::kINT32);
                 mNbInputChannels = *(static_cast<const int*>(fields[i].data));
             }
             if (!strcmp(attrName, "inputHeight"))
             {
-                //assert(fields[i].type == PluginFieldType::kINT32);
                 mInputHeight = *(static_cast<const int*>(fields[i].data));
             }
             if (!strcmp(attrName, "inputWidth"))
             {
-                //assert(fields[i].type == PluginFieldType::kINT32);
                 mInputWidth = *(static_cast<const int*>(fields[i].data));
             }
         }

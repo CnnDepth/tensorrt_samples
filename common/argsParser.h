@@ -49,6 +49,7 @@ struct Args
     std::string uffInputBlob{""};
     std::string outputBlob{""};
     std::string engineFile{""};
+    std::string processFile{""};
     int height{480};
     int width{640};
     int useDLACore{-1};
@@ -66,7 +67,6 @@ inline bool parseArgs(Args& args, int argc, char* argv[])
 {
     while (1)
     {
-        std::cout << "while" << std::endl;
         int arg;
         static struct option long_options[] = {
             {"help", no_argument, 0, 'h'},
@@ -79,12 +79,11 @@ inline bool parseArgs(Args& args, int argc, char* argv[])
             {"datadir", required_argument, 0, 'd'},
             {"int8", no_argument, 0, 'i'},
             {"useDLACore", required_argument, 0, 'u'},
+            {"processImage", required_argument, 0, 'p'},
             {"fp16", no_argument, 0, 'f'},
             {nullptr, 0, nullptr, 0}};
         int option_index = 0;
         arg = getopt_long_only(argc, argv, "hd:iu", long_options, &option_index);
-        std::cout << "option index: " << option_index << std::endl;
-        std::cout << "arg: " << arg << std::endl;
         if (arg == -1)
             break;
 
@@ -167,6 +166,15 @@ inline bool parseArgs(Args& args, int argc, char* argv[])
             else
             {
                 std::cerr << "ERROR: --engine requires option argument" << std::endl;
+                return false;
+            }
+            break;
+        case 'e':
+            if (optarg)
+                args.processFile = optarg;
+            else
+            {
+                std::cerr << "ERROR: --processFile requires option argument" << std::endl;
                 return false;
             }
             break;
